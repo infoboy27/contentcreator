@@ -1,8 +1,10 @@
 #!/bin/sh
-# Borra los videos de prueba viejos de data/test-videos (los crea Studio y tools/test-video.js).
+# Limpieza de ContentCreator: videos de prueba viejos y videos publicados/rechazados viejos.
 # Uso: limpieza-pruebas.sh [dias] [--dry-run]   (por defecto 7 días)
 # - Pruebas terminadas (.mp4 + su carpeta de escenas): se borran pasados [dias].
 # - Carpetas sin .mp4 (pruebas que fallaron o se cortaron): se borran pasado 1 día.
+# - Videos publicados o rechazados hace más de [dias]: se borra el MP4 y las escenas (queda metadata.json).
+#   Los que esperan aprobación nunca se borran.
 DIAS=${1:-7}
 SECO=0; [ "$2" = "--dry-run" ] && SECO=1
 docker exec -e DIAS="$DIAS" -e SECO="$SECO" contentcreator-site sh -c '
@@ -15,3 +17,5 @@ docker exec -e DIAS="$DIAS" -e SECO="$SECO" contentcreator-site sh -c '
     [ -f "$d.mp4" ] || borrar "$d"
   done
 '
+# Videos publicados o rechazados hace mas de [dias]: se borra el MP4 y las escenas, queda metadata.json.
+docker exec contentcreator-site node /app/tools/limpieza-videos.js "$DIAS" $2
