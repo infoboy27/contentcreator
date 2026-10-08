@@ -1,0 +1,29 @@
+# Override para GPUs NVIDIA (requiere nvidia-container-toolkit).
+# Ollama usa CUDA; sdcpp sigue con Vulkan usando el driver de NVIDIA.
+# Sin probar en hardware NVIDIA: la configuración de referencia es AMD (RX 6700 XT).
+services:
+  ollama:
+    image: ollama/ollama:latest
+    devices: !reset []
+    group_add: !reset []
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  sdcpp:
+    devices: !reset []
+    group_add: !reset []
+    environment:
+      - OLLAMA_URL=http://ollama:11434
+      - NVIDIA_DRIVER_CAPABILITIES=all
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

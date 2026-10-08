@@ -1,0 +1,12 @@
+[Unit]
+Description=Curva agresiva de ventiladores para la GPU AMD
+After=multi-user.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/gpu-fan-curve.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

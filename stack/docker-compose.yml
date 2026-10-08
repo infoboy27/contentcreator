@@ -1,0 +1,106 @@
+# Stack completo para un equipo nuevo: IA local + ContentCreator + n8n (+ túnel de Cloudflare opcional).
+# No lo uses directamente: usa scripts/stack.sh, que agrega el .env y el override de NVIDIA si corresponde.
+name: contentcreator
+
+services:
+  ollama:
+    image: ollama/ollama:rocm
+    restart: unless-stopped
+    devices:
+      - /dev/kfd
+      - /dev/dri
+    group_add:
+      - "${VIDEO_GID:-44}"
+      - "${RENDER_GID:-991}"
+    environment:
+      # RX 6700 XT (gfx1031) no está en la lista oficial de ROCm; se presenta como gfx1030. Vacío en otras GPUs.
+      - HSA_OVERRIDE_GFX_VERSION=${HSA_OVERRIDE_GFX_VERSION:-}
+      - OLLAMA_KEEP_ALIVE=-1
+      - OLLAMA_CONTEXT_LENGTH=8192
+    volumes:
+      - ollama:/root/.ollama
+    ports:
+      - "127.0.0.1:11434:11434"
+
+  speaches:
+    image: ghcr.io/speaches-ai/speaches:latest-cpu
+    restart: unless-stopped
+    environment:
+      - WHISPER__TTL=600
+    volumes:
+      - speaches-cache:/home/ubuntu/.cache/huggingface/hub
+
+  sdcpp:
+    build: ./sdcpp
+    image: sdcpp-vulkan:local
+    restart: unless-stopped
+    devices:
+      - /dev/dri
+    group_add:
+      - "${VIDEO_GID:-44}"
+      - "${RENDER_GID:-991}"
+    environment:
+      - OLLAMA_URL=http://ollama:11434
+    volumes:
+      - ${MODELS_DIR:-./models}:/models:ro
+
+  contentcreator:
+    image: node:22-alpine
+    restart: unless-stopped
+    working_dir: /app
+    command: ["sh", "-c", "apk add --no-cache ffmpeg font-dejavu >/tmp/apk-install.log && node server.js"]
+    env_file:
+      - ../.env
+    environment:
+      - DATA_DIR=/app/data
+      - PORT=3000
+    volumes:
+      - ../server.js:/app/server.js:ro
+      - ../public:/app/public:ro
+      - ../tools:/app/tools:ro
+      - ../data:/app/data
+    ports:
+      - "127.0.0.1:${CONTENTCREATOR_PORT:-3000}:3000"
+    networks:
+      default:
+        aliases:
+          - contentcreator-site
+
+  n8n:
+    image: n8nio/n8n:2.32.5
+    restart: unless-stopped
+    environment:
+      - N8N_HOST=${N8N_HOST:-localhost}
+      - N8N_PROTOCOL=${N8N_PROTOCOL:-https}
+      - N8N_PORT=5678
+      - WEBHOOK_URL=${N8N_PUBLIC_URL:-http://localhost:5678}/
+      - N8N_PROXY_HOPS=1
+      - N8N_SECURE_COOKIE=${N8N_SECURE_COOKIE:-true}
+      - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
+      # Los workflows leen el token del bot con $env (nunca queda guardado dentro del workflow).
+      - N8N_BLOCK_ENV_ACCESS_IN_NODE=false
+      - GENERIC_TIMEZONE=${TZ:-America/Santo_Domingo}
+      - TZ=${TZ:-America/Santo_Domingo}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
+      - CONTENTCREATOR_INTERNAL_TOKEN=${CONTENTCREATOR_INTERNAL_TOKEN}
+    volumes:
+      - n8n:/home/node/.n8n
+      - ../n8n/workflows:/workflows:ro
+    ports:
+      - "127.0.0.1:${N8N_PORT:-5678}:5678"
+
+  # Opcional (perfil "tunnel"): publica Studio y n8n sin abrir puertos. Las rutas se configuran en Cloudflare.
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN:-}
+    profiles:
+      - tunnel
+
+volumes:
+  ollama:
+  speaches-cache:
+  n8n:

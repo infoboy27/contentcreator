@@ -1,0 +1,33 @@
+# Despliegue de este servidor (Traefik + stack de IA en ~/ai-local). Para un equipo nuevo usa scripts/install.sh.
+services:
+  web:
+    image: node:22-alpine
+    container_name: contentcreator-site
+    restart: unless-stopped
+    working_dir: /app
+    command: ["sh", "-c", "apk add --no-cache ffmpeg font-dejavu >/tmp/apk-install.log && node server.js"]
+    env_file:
+      - .env
+    volumes:
+      - ./server.js:/app/server.js:ro
+      - ./public:/app/public:ro
+      - ./tools:/app/tools:ro
+      - ./data:/app/data
+    networks:
+      - proxy
+      - ai-local
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: proxy
+      traefik.http.routers.contentcreator.entrypoints: websecure
+      traefik.http.routers.contentcreator.rule: Host(`contentcreator.jfmcss.com`)
+      traefik.http.routers.contentcreator.tls: "true"
+      traefik.http.routers.contentcreator.tls.certresolver: cloudflare
+      traefik.http.services.contentcreator.loadbalancer.server.port: "3000"
+
+networks:
+  proxy:
+    external: true
+  ai-local:
+    external: true
+    name: ai-local_default

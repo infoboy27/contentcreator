@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ContentCreator by jfmcss</title>
+  <meta name="description" content="ContentCreator is a private analytics and reporting tool built and operated by jfmcss for short-form content workflows on TikTok, YouTube and Facebook.">
+  <link rel="icon" href="/assets/contentcreator-app-icon.png">
+  <style>
+    :root { font-family: Inter, Arial, Helvetica, sans-serif; color: #17212b; background: #f5f7f4; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #f5f7f4; }
+    header { min-height: 64px; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; padding: 14px 28px; border-bottom: 1px solid #dfe5dc; background: #ffffff; }
+    .brand { display: flex; align-items: center; gap: 12px; font-weight: 700; color: #12323a; }
+    .brand img { width: 36px; height: 36px; border-radius: 8px; }
+    nav { display: flex; gap: 18px; font-size: 14px; flex-wrap: wrap; }
+    nav a { color: #34515a; text-decoration: none; }
+    nav a:hover { text-decoration: underline; }
+    main { max-width: 900px; margin: 0 auto; padding: 28px; }
+    section { margin-bottom: 40px; }
+    .hero { background: #ffffff; border: 1px solid #dfe5dc; border-radius: 8px; padding: 32px; }
+    h1 { font-size: 32px; line-height: 1.2; margin: 0 0 14px; color: #0d3138; }
+    h2 { margin: 0 0 16px; font-size: 21px; color: #173f34; }
+    h3 { margin: 0 0 6px; font-size: 16px; color: #173f34; }
+    p { margin: 0 0 14px; line-height: 1.6; color: #405057; }
+    ul { margin: 0 0 14px; padding-left: 20px; color: #405057; line-height: 1.6; }
+    .steps { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
+    .step { border: 1px solid #e0e5dc; border-radius: 8px; padding: 16px; background: #ffffff; }
+    .step .num { display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; border-radius: 999px; background: #0f3a40; color: #fff; font-size: 13px; font-weight: 700; margin-bottom: 10px; }
+    .panel { background: #ffffff; border: 1px solid #dfe5dc; border-radius: 8px; padding: 24px; }
+    .actions { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 10px; }
+    .button { border: 0; border-radius: 6px; padding: 12px 16px; font-weight: 700; text-decoration: none; display: inline-flex; align-items: center; justify-content: center; min-height: 44px; }
+    .primary { background: #0f3a40; color: #fff; }
+    .secondary { background: #edf2ec; color: #183238; border: 1px solid #d3ddd3; }
+    .note { font-size: 13px; color: #607078; margin-top: 10px; }
+    footer { padding: 18px 28px 36px; text-align: center; color: #617078; font-size: 13px; }
+    footer a { color: #34515a; }
+    @media (max-width: 760px) { header { padding: 12px 16px; } main { padding: 18px; } .steps { grid-template-columns: 1fr 1fr; } h1 { font-size: 26px; } }
+    @media (max-width: 480px) { .steps { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="brand"><img src="/assets/contentcreator-app-icon.png" alt=""><span>ContentCreator</span></div>
+    <nav>
+      <a href="#about">About</a>
+      <a href="#how-it-works">How it works</a>
+      <a href="#data">Data we access</a>
+      <a href="#contact">Contact</a>
+      <a href="/terms">Terms</a>
+      <a href="/privacy">Privacy</a>
+    </nav>
+  </header>
+  <main>
+    <section class="hero">
+      <h1>Private growth reporting for short-form content</h1>
+      <p>ContentCreator is an internal analytics and reporting tool built and operated by <strong>jfmcss</strong>. It connects to TikTok's Login Kit to read basic statistics for accounts the operator owns, and turns that data into private growth reports delivered through Telegram — supporting a personal short-form video workflow that also covers YouTube and Facebook.</p>
+      <p>ContentCreator is not a public product for third parties. Only TikTok accounts explicitly owned and authorized by the operator are ever connected.</p>
+    </section>
+
+    <section id="about">
+      <h2>About ContentCreator</h2>
+      <p>ContentCreator supports a small content operation that produces short-form devotional and entertainment videos. The tool automates the parts of that workflow that don't need a human: drafting scripts, generating narration and imagery, assembling vertical video, and — once a video is published — pulling back performance data so the operator can see what's working.</p>
+      <p>The TikTok integration on this site is one piece of that: it lets the operator link their own TikTok account so ContentCreator can read account-level statistics and summarize them, rather than requiring the operator to check the TikTok app manually.</p>
+    </section>
+
+    <section id="how-it-works">
+      <h2>How it works</h2>
+      <div class="steps">
+        <div class="step"><span class="num">1</span><h3>Authorize</h3><p style="margin:0">The operator connects their own TikTok account through TikTok's official Login Kit (OAuth). No third-party accounts are connected.</p></div>
+        <div class="step"><span class="num">2</span><h3>Read</h3><p style="margin:0">ContentCreator reads basic profile information and account statistics made available through the TikTok API for that authorized account.</p></div>
+        <div class="step"><span class="num">3</span><h3>Summarize</h3><p style="margin:0">The data is compiled into a short, structured growth report — followers, likes, and recent video performance.</p></div>
+        <div class="step"><span class="num">4</span><h3>Deliver</h3><p style="margin:0">The report is sent privately to the operator via Telegram, on request or on a schedule.</p></div>
+      </div>
+    </section>
+
+    <section id="data">
+      <h2>Data we access</h2>
+      <ul>
+        <li>Basic profile information (username, display name, avatar) for the authorized account</li>
+        <li>Account-level statistics (follower count, likes, video count)</li>
+        <li>Public video metadata for performance review</li>
+      </ul>
+      <p>ContentCreator does not access or request data for any account other than the one explicitly authorized by its owner, and does not sell or share this data with third parties. See the full <a href="/privacy">Privacy Policy</a> and <a href="/terms">Terms of Service</a> for details.</p>
+    </section>
+
+    <section id="connect" class="panel">
+      <h2>Authorize access</h2>
+      <p>If you are the operator and want to (re)authorize this tool against your own TikTok account, use the button below. This starts TikTok's official Login Kit authorization flow.</p>
+      <div class="actions">
+        <a class="button primary" href="https://www.tiktok.com/v2/auth/authorize/?client_key=sbaw8igg3fhql3zvoe&response_type=code&scope=user.info.basic,user.info.profile,user.info.stats&redirect_uri=https%3A%2F%2Fcontentcreator.jfmcss.com%2Ftiktok-callback&state=contentcreator-demo">Connect TikTok</a>
+        <a class="button secondary" href="/youtube/start">Connect YouTube</a>
+      </div>
+      <p class="note">This flow is intended for the account owner only. It is not a public sign-up.</p>
+    </section>
+
+    <section id="contact">
+      <h2>Contact</h2>
+      <p>Questions about this tool, the data it accesses, or a data deletion request can be sent to <a href="mailto:jmservicedo@gmail.com">jmservicedo@gmail.com</a>.</p>
+    </section>
+  </main>
+  <footer>
+    jfmcss &middot; ContentCreator uses TikTok Login Kit only with accounts authorized by the operator.<br>
+    <a href="/terms">Terms of Service</a> &middot; <a href="/privacy">Privacy Policy</a> &middot; <a href="mailto:jmservicedo@gmail.com">Contact</a>
+  </footer>
+</body>
+</html>

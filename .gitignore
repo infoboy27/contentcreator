@@ -1,0 +1,16 @@
+# Secretos y datos del servidor
+.env
+.env.*
+!.env.example
+data/
+
+# Modelos (se descargan con scripts/download-models.sh)
+stack/models/
+
+# Respaldos y restos de versiones anteriores
+backups/
+*.bak*
+*.bad-*
+server.js.bak-
+node_modules/
+__pycache__/

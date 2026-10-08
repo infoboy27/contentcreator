@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TikTok Connected - ContentCreator</title>
+  <style>
+    :root { font-family: Inter, Arial, Helvetica, sans-serif; color: #17212b; background: #f5f7f4; }
+    body { margin: 0; display: grid; min-height: 100vh; place-items: center; background: #f5f7f4; }
+    main { width: min(760px, calc(100vw - 32px)); background: #fff; border: 1px solid #dfe5dc; border-radius: 8px; padding: 28px; }
+    h1 { margin: 0 0 12px; color: #0d3138; font-size: 30px; }
+    p { line-height: 1.55; color: #405057; }
+    .status { display: inline-flex; gap: 10px; align-items: center; padding: 10px 12px; border-radius: 8px; background: #eff7ef; color: #214a2c; margin-bottom: 18px; }
+    .dot { width: 10px; height: 10px; border-radius: 999px; background: #2e9d57; }
+    .box { background: #10282e; color: #f3fbf4; padding: 16px; border-radius: 8px; font-family: Consolas, Menlo, monospace; white-space: pre-line; font-size: 13px; line-height: 1.45; }
+    a { color: #0b63ce; }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="status"><span class="dot"></span><span>TikTok authorization received</span></div>
+    <h1>ContentCreator connected your TikTok account</h1>
+    <p>This demo callback shows the end of the Login Kit authorization flow. In production, ContentCreator exchanges the authorization code securely and uses the approved scopes to create private growth reports for the account owner.</p>
+    <div class="box" id="report">Loading authorization result...</div>
+    <p><a href="/">Return to dashboard</a></p>
+  </main>
+  <script>
+    const params = new URLSearchParams(location.search);
+    const scopes = params.get('scopes') || 'user.info.basic,user.info.profile,user.info.stats';
+    const code = params.get('code');
+    document.getElementById('report').textContent = [
+      'TikTok Login Kit: authorized',
+      'Authorization code received: ' + (code ? 'yes' : 'no'),
+      'Approved scopes: ' + scopes,
+      '',
+      'Private report preview',
+      'Followers: available through user.info.stats',
+      'Likes count: available through user.info.stats',
+      'Video count: available through user.info.stats',
+      'Telegram delivery: configured for the account owner'
+    ].join('\n');
+  </script>
+</body>
+</html>
