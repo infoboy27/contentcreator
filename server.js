@@ -11,6 +11,8 @@ const appBaseUrl = (process.env.APP_BASE_URL || 'https://contentcreator.jfmcss.c
 const clientId = process.env.YOUTUBE_CLIENT_ID || '';
 const clientSecret = process.env.YOUTUBE_CLIENT_SECRET || '';
 const internalToken = process.env.CONTENTCREATOR_INTERNAL_TOKEN || '';
+const tiktokClientKey = process.env.TIKTOK_CLIENT_KEY || '';
+const tiktokClientSecret = process.env.TIKTOK_CLIENT_SECRET || '';
 const openaiApiKey = process.env.OPENAI_API_KEY || '';
 const openaiScriptModel = process.env.OPENAI_SCRIPT_MODEL || 'gpt-5.6-terra';
 const minimumNarrationSeconds = 60;
@@ -25,6 +27,7 @@ const facebookPublishingEnabled = !['0', 'false', 'off', 'disabled'].includes(
 const tokenPath = path.join(dataDir, 'youtube-token.json');
 const youtubeChannelsDir = path.join(dataDir, 'youtube-channels');
 const statePath = path.join(dataDir, 'youtube-oauth-states.json');
+const tiktokTokenPath = path.join(dataDir, 'tiktok-token.json');
 const publishLogPath = path.join(dataDir, 'publish-log.json');
 const videoPublishLogPath = path.join(dataDir, 'video-publish-log.json');
 const contentHistoryPath = path.join(dataDir, 'content-history.json');
@@ -340,6 +343,119 @@ async function refreshAccessToken(stored, savePath = tokenPath) {
   };
   writeJson(savePath, next);
   return next;
+}
+
+// --- TikTok: el video se envia a la bandeja (inbox) de la cuenta; el usuario lo publica desde la app.
+// La publicacion directa en publico exige auditoria, y TikTok no la aprueba para herramientas de uso propio.
+const tiktokRedirectUri = `${appBaseUrl}/tiktok-callback`;
+
+async function tiktokTokenRequest(params) {
+  const response = await fetch('https://open.tiktokapis.com/v2/oauth/token/', {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ client_key: tiktokClientKey, client_secret: tiktokClientSecret, ...params }),
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok || payload.error) {
+    const error = new Error(payload.error_description || payload.error || `TikTok token HTTP ${response.status}`);
+    error.code = payload.error === 'invalid_grant' ? 'TIKTOK_RECONNECT_REQUIRED' : 'TIKTOK_TOKEN_FAILED';
+    throw error;
+  }
+  const now = Date.now();
+  return {
+    ...payload,
+    expires_at: now + (payload.expires_in || 86400) * 1000,
+    refresh_expires_at: now + (payload.refresh_expires_in || 365 * 86400) * 1000,
+    updated_at: new Date(now).toISOString(),
+  };
+}
+
+async function tiktokAccessToken() {
+  const stored = readJson(tiktokTokenPath, null);
+  if (!stored?.refresh_token) {
+    const error = new Error('TikTok no esta conectado.');
+    error.code = 'TIKTOK_NOT_CONNECTED';
+    throw error;
+  }
+  if (stored.access_token && Date.now() < stored.expires_at - 5 * 60_000) return stored;
+  try {
+    const next = { ...stored, ...(await tiktokTokenRequest({ grant_type: 'refresh_token', refresh_token: stored.refresh_token })) };
+    writeJson(tiktokTokenPath, next);
+    return next;
+  } catch (error) {
+    if (error.code === 'TIKTOK_RECONNECT_REQUIRED') error.message = 'El permiso de TikTok vencio o fue revocado. Reconecta TikTok en Studio → Canales.';
+    throw error;
+  }
+}
+
+async function tiktokApi(pathname, accessToken, body) {
+  const response = await fetch(`https://open.tiktokapis.com${pathname}`, {
+    method: body ? 'POST' : 'GET',
+    headers: { authorization: `Bearer ${accessToken}`, ...(body ? { 'content-type': 'application/json; charset=UTF-8' } : {}) },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok || (payload.error?.code && payload.error.code !== 'ok')) {
+    const error = new Error(`TikTok: ${payload.error?.message || payload.error?.code || `HTTP ${response.status}`}`);
+    error.code = payload.error?.code || 'TIKTOK_API_FAILED';
+    throw error;
+  }
+  return payload.data || {};
+}
+
+// Sube el MP4 local (FILE_UPLOAD; no requiere verificar dominio) a la bandeja de TikTok.
+async function sendVideoToTikTokInbox(filePath) {
+  const token = await tiktokAccessToken();
+  const size = fs.statSync(filePath).size;
+  // TikTok: un solo trozo si pesa hasta 64 MB; si no, trozos de 10 MB (el ultimo absorbe el resto).
+  const chunkSize = size <= 64 * 1024 * 1024 ? size : 10 * 1024 * 1024;
+  const totalChunks = Math.max(1, Math.floor(size / chunkSize));
+  const init = await tiktokApi('/v2/post/publish/inbox/video/init/', token.access_token, {
+    source_info: { source: 'FILE_UPLOAD', video_size: size, chunk_size: chunkSize, total_chunk_count: totalChunks },
+  });
+  const file = fs.readFileSync(filePath);
+  for (let index = 0; index < totalChunks; index += 1) {
+    const start = index * chunkSize;
+    const end = index === totalChunks - 1 ? size - 1 : start + chunkSize - 1;
+    const response = await fetch(init.upload_url, {
+      method: 'PUT',
+      headers: { 'content-type': 'video/mp4', 'content-range': `bytes ${start}-${end}/${size}`, 'content-length': String(end - start + 1) },
+      body: file.subarray(start, end + 1),
+    });
+    if (!response.ok) throw new Error(`TikTok: la subida del video fallo (HTTP ${response.status}).`);
+  }
+  return { ok: true, mode: 'inbox', publish_id: init.publish_id, account: token.display_name || null, sent_at: new Date().toISOString(), reason: 'Enviado a tu bandeja de TikTok: abre la notificacion en la app y pulsa Publicar.' };
+}
+
+async function sendGeneratedVideoToTikTok(video) {
+  if (video.destinationId !== 'religioso') return { skipped: true, reason: 'Este destino no tiene cuenta TikTok configurada.' };
+  if (!tiktokClientKey || !readJson(tiktokTokenPath, null)?.refresh_token) {
+    return { manual_required: true, reason: 'TikTok no esta conectado; usa el MP4 para carga manual.' };
+  }
+  const filePath = path.join(dataDir, 'generated-videos', path.basename(video.fileName || ''));
+  if (!fs.existsSync(filePath)) return { ok: false, error: 'El MP4 ya no existe en el servidor.', reason: 'El MP4 ya no existe en el servidor.' };
+  try {
+    return await sendVideoToTikTokInbox(filePath);
+  } catch (error) {
+    return { ok: false, error: error.message, code: error.code || 'TIKTOK_UPLOAD_FAILED', manual_required: true, reason: `No se pudo enviar a TikTok (${error.message}); usa el MP4 para carga manual.` };
+  }
+}
+
+async function tiktokStudioStatus() {
+  const base = { connectUrl: '/tiktok/start', destinations: ['Vida con Dios'] };
+  if (!tiktokClientKey || !tiktokClientSecret) {
+    return { ...base, status: 'disconnected', configured: false, message: 'Falta TIKTOK_CLIENT_KEY / TIKTOK_CLIENT_SECRET en el .env. Mientras tanto, se sube a mano.' };
+  }
+  const stored = readJson(tiktokTokenPath, null);
+  if (!stored?.refresh_token) {
+    return { ...base, status: 'disconnected', configured: true, message: 'Sin conectar: se sube a mano (descarga el MP4 y copia el texto).' };
+  }
+  try {
+    const token = await tiktokAccessToken();
+    return { ...base, status: 'ok', configured: true, account: token.display_name || null, message: `Conectado${token.display_name ? ` como ${token.display_name}` : ''}. Al aprobar, el video llega a tu bandeja de TikTok: toca la notificacion y pulsa Publicar.` };
+  } catch (error) {
+    return { ...base, status: error.code === 'TIKTOK_RECONNECT_REQUIRED' ? 'expired' : 'error', configured: true, message: error.message };
+  }
 }
 
 async function googleGet(url, accessToken) {
@@ -2335,6 +2451,7 @@ async function publishGeneratedVideo(command, options = {}) {
     };
   }
 
+  const tiktok = await sendGeneratedVideoToTikTok(video);
   const published = {
     mode: 'published',
     fileName: video.fileName,
@@ -2342,6 +2459,7 @@ async function publishGeneratedVideo(command, options = {}) {
     contentId: video.contentId,
     facebook,
     youtube,
+    tiktok,
   };
   appendVideoPublishLog(published);
   appendContentHistory({
@@ -2356,7 +2474,7 @@ async function publishGeneratedVideo(command, options = {}) {
   writeJson(selected.metadataPath, {
     ...video,
     published_at: new Date().toISOString(),
-    publish_result: { facebook, youtube },
+    publish_result: { facebook, youtube, tiktok },
   });
   upsertContentItem({
     ...(findContentItem(video.contentId) || {}),
@@ -2365,7 +2483,7 @@ async function publishGeneratedVideo(command, options = {}) {
     title: video.title,
     description: video.description,
     published_at: new Date().toISOString(),
-    publish_result: { facebook, youtube },
+    publish_result: { facebook, youtube, tiktok },
     last_publish_error: null,
   });
 
@@ -2375,14 +2493,9 @@ async function publishGeneratedVideo(command, options = {}) {
     video,
     facebook,
     youtube,
-      tiktok: {
-        manual_required: video.destinationId === 'religioso',
-        reason: video.destinationId === 'religioso'
-          ? 'Vida con Dios es la unica cuenta con TikTok; usa el MP4 para carga manual.'
-          : 'Este destino no tiene cuenta TikTok configurada.',
-      },
-    };
-  }
+    tiktok,
+  };
+}
 
 function rejectContent(command) {
   const contentId = contentIdFromCommand(command);
@@ -3856,6 +3969,7 @@ function studioState() {
         status: item.status,
         available: Boolean(generated),
         youtubeUrl: item.publish_result?.youtube?.url || null,
+        tiktokSent: Boolean(item.publish_result?.tiktok?.ok),
         title: item.title || metadata.title,
         description: item.description || metadata.description,
         tags: youtubeTagsFor(metadata.destinationId),
@@ -4018,7 +4132,7 @@ async function studioChannels() {
   }
   return {
     youtube,
-    tiktok: { status: 'manual', message: 'TikTok se sube a mano: descarga el MP4 y copia el texto desde el Studio.', destinations: ['Vida con Dios'] },
+    tiktok: await tiktokStudioStatus(),
     facebook: { status: facebookPublishingEnabled ? 'ok' : 'disabled', message: facebookPublishingEnabled ? 'Publicacion en Facebook activa.' : 'Facebook esta deshabilitado (FACEBOOK_PUBLISHING_ENABLED=false).' },
   };
 }
@@ -4078,6 +4192,14 @@ async function handleStudio(req, res, url) {
       const result = await publishGeneratedVideo(`APROBAR ${String(body.contentId || '')}`, body);
       return json(res, result.ok ? 200 : 409, result);
     }
+    if (route === 'tiktok-send') {
+      const item = findContentItem(String(body.contentId || ''));
+      const generated = item && generatedVideoForContentId(item.contentId);
+      if (!generated) return json(res, 404, { ok: false, error: 'No existe ese video o ya se borro el MP4.' });
+      const tiktok = await sendGeneratedVideoToTikTok(generated.metadata);
+      if (tiktok.ok) upsertContentItem({ ...item, publish_result: { ...(item.publish_result || {}), tiktok } });
+      return json(res, tiktok.ok ? 200 : 409, { ok: Boolean(tiktok.ok), tiktok, error: tiktok.error || tiktok.reason });
+    }
     if (route === 'reject') return json(res, 200, rejectContent(`RECHAZAR ${String(body.contentId || '')}`));
     if (route === 'settings') return json(res, 200, { ok: true, settings: await saveStudioSettings(body) });
     if (route === 'voice-sample') return send(res, 200, await studioVoiceSample(body), 'audio/mpeg');
@@ -4121,6 +4243,40 @@ async function handle(req, res) {
         state,
       });
       return redirect(res, `https://accounts.google.com/o/oauth2/v2/auth?${params}`);
+    }
+
+    if (url.pathname === '/tiktok/start') {
+      if (!studioAuthorized(req)) return redirect(res, '/studio');
+      if (!tiktokClientKey || !tiktokClientSecret) return send(res, 500, 'Falta TIKTOK_CLIENT_KEY / TIKTOK_CLIENT_SECRET en el .env', 'text/plain; charset=utf-8');
+      const state = crypto.randomBytes(24).toString('hex');
+      saveOAuthState(state, 'tiktok');
+      const params = new URLSearchParams({
+        client_key: tiktokClientKey,
+        scope: 'user.info.basic,video.upload',
+        response_type: 'code',
+        redirect_uri: tiktokRedirectUri,
+        state,
+      });
+      return redirect(res, `https://www.tiktok.com/v2/auth/authorize/?${params}`);
+    }
+
+    if (url.pathname === '/tiktok-callback' && (url.searchParams.has('code') || url.searchParams.has('error'))) {
+      const page = (title, text) => send(res, 200, `<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title>
+<style>body{font-family:Arial,Helvetica,sans-serif;background:#f5f7f4;color:#17212b;margin:0;display:grid;min-height:100vh;place-items:center}main{width:min(640px,calc(100vw - 32px));background:#fff;border:1px solid #dfe5dc;border-radius:8px;padding:28px}h1{color:#0d3138;font-size:24px}</style></head>
+<body><main><h1>${title}</h1><p>${text}</p><p><a href="/studio">Volver al Studio</a></p></main></body></html>`, 'text/html; charset=utf-8');
+      if (!consumeOAuthState(url.searchParams.get('state'))) return page('TikTok: enlace vencido', 'Vuelve al Studio y pulsa Conectar TikTok otra vez.');
+      if (url.searchParams.has('error')) return page('TikTok no se conecto', escapeHtml(url.searchParams.get('error_description') || url.searchParams.get('error')));
+      try {
+        const token = await tiktokTokenRequest({ grant_type: 'authorization_code', code: url.searchParams.get('code'), redirect_uri: tiktokRedirectUri });
+        if (!String(token.scope || '').includes('video.upload')) {
+          return page('Falta un permiso', 'TikTok no concedio <b>video.upload</b>. Revisa que la app tenga Content Posting API y vuelve a conectar marcando todos los permisos.');
+        }
+        const user = await tiktokApi('/v2/user/info/?fields=open_id,display_name', token.access_token).catch(() => ({}));
+        writeJson(tiktokTokenPath, { ...token, display_name: user.user?.display_name || null, connected_at: new Date().toISOString() });
+        return page('TikTok conectado', `Cuenta: <b>${escapeHtml(user.user?.display_name || token.open_id)}</b>. Al aprobar un video de Vida con Dios, llegara a tu bandeja de TikTok.`);
+      } catch (error) {
+        return page('TikTok no se conecto', escapeHtml(error.message));
+      }
     }
 
     if (url.pathname === '/youtube/callback') {

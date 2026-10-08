@@ -213,6 +213,7 @@ const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&
 const labels = { religioso: 'Vida con Dios', fanspeliculas: 'Películas' };
 const statusLabels = { publish_failed: ['Falló la publicación', 'bad'], preview_ready: ['Por aprobar', 'warn'], published: ['Publicado', 'ok'], rejected: ['Rechazado', 'bad'], approved: ['Aprobado', 'ok'], test: ['Prueba', ''] };
 let state = null;
+let tiktokConnected = false;
 let ui = { dest: 'religioso', idea: 0, mode: 'preview', settingsLoaded: false };
 let timer = null;
 
@@ -411,7 +412,7 @@ function videoCard(v) {
   let actions = '';
   if ((v.status === 'preview_ready' || v.status === 'publish_failed') && v.available) actions = publishForm(v);
   if (v.kind === 'test') actions = `<div class="row"><button class="btn bad" data-delete="${esc(v.fileName)}">Borrar prueba</button><a class="btn" href="${src}" download>Descargar</a></div>`;
-  if (v.kind === 'generated' && v.available && v.status === 'published') actions = `<div class="row">${v.youtubeUrl ? `<a class="btn" href="${esc(v.youtubeUrl)}" target="_blank" rel="noopener">Ver en YouTube</a>` : ''}<a class="btn" href="${src}" download="${esc(v.slug)}.mp4">${v.tiktokManual ? 'MP4 para TikTok' : 'Descargar MP4'}</a>${v.tiktokManual ? `<button class="btn" data-copy="${esc(v.contentId)}">Copiar texto</button>` : ''}</div>`;
+  if (v.kind === 'generated' && v.available && v.status === 'published') actions = `<div class="row">${v.youtubeUrl ? `<a class="btn" href="${esc(v.youtubeUrl)}" target="_blank" rel="noopener">Ver en YouTube</a>` : ''}<a class="btn" href="${src}" download="${esc(v.slug)}.mp4">${v.tiktokManual ? 'MP4 para TikTok' : 'Descargar MP4'}</a>${v.tiktokManual ? `<button class="btn" data-copy="${esc(v.contentId)}">Copiar texto</button><button class="btn" data-tiktok="${esc(v.contentId)}">${v.tiktokSent ? 'Reenviar a TikTok' : 'Enviar a TikTok'}</button>` : ''}</div>`;
   return `<article class="card vcard">
     ${v.available ? `<video controls playsinline preload="metadata" src="${src}"></video>` : '<div class="empty">El archivo ya no existe</div>'}
     <h3>${esc(v.title || v.idea || v.fileName)}</h3>
@@ -427,7 +428,7 @@ const privacyLabels = { public: 'Público', unlisted: 'No listado', private: 'Pr
 function publishForm(v) {
   const targets = [
     v.youtubeChannel ? `<span class="target ok">YouTube · ${esc(v.youtubeChannel)}</span>` : '',
-    v.tiktokManual ? '<span class="target">TikTok · a mano (descarga el MP4)</span>' : '',
+    v.tiktokManual ? `<span class="target ${tiktokConnected ? 'ok' : ''}">TikTok · ${tiktokConnected ? 'a tu bandeja (la publicas desde la app)' : 'a mano (descarga el MP4)'}</span>` : '',
     v.facebookPage ? `<span class="target ok">Facebook · ${esc(v.facebookPage)}</span>` : '',
   ].join('');
   const error = v.publishError ? `<div class="alert">${esc(v.publishError)}${v.reconnectUrl ? ` <a href="${esc(v.reconnectUrl)}">Reconectar el canal</a>` : ''}</div>` : '';
@@ -483,6 +484,7 @@ async function loadChannels() {
   const box = $('#channelsBox');
   try {
     const { channels } = await api('channels');
+    tiktokConnected = channels.tiktok.status === 'ok';
     const expired = channels.youtube.filter((c) => c.status !== 'ok');
     $('#channelAlert').hidden = !expired.length;
     const testing = channels.youtube.some((c) => c.testingMode);
@@ -504,7 +506,15 @@ async function loadChannels() {
             <a class="btn ${c.status === 'ok' ? '' : 'primary'}" href="${esc(c.connectUrl)}">${c.status === 'disconnected' ? 'Conectar' : 'Reconectar'}</a>
           </div>`;
         }).join('')}
-        <div class="card channel"><h3><i class="dot"></i>TikTok · Vida con Dios</h3><div class="chips" style="margin-bottom:8px"><span class="chip">Manual</span></div><p class="small muted">${esc(channels.tiktok.message)}</p></div>
+        ${(() => {
+          const t = channels.tiktok;
+          const [label, cls] = t.status === 'ok' ? ['Conectado · bandeja', 'ok'] : (statusText[t.status] || [t.status, '']);
+          return `<div class="card channel"><h3><i class="dot ${cls === 'ok' ? 'ok' : 'bad'}"></i>TikTok · Vida con Dios</h3>
+            <div class="chips" style="margin-bottom:8px"><span class="chip ${cls}">${label}</span></div>
+            <p class="small muted">${esc(t.message)}</p>
+            ${t.configured ? `<a class="btn ${t.status === 'ok' ? '' : 'primary'}" href="${esc(t.connectUrl)}">${t.status === 'disconnected' ? 'Conectar TikTok' : 'Reconectar'}</a>` : ''}
+          </div>`;
+        })()}
         <div class="card channel"><h3><i class="dot ${channels.facebook.status === 'ok' ? 'ok' : ''}"></i>Facebook</h3><div class="chips" style="margin-bottom:8px"><span class="chip">${channels.facebook.status === 'ok' ? 'Activo' : 'Deshabilitado'}</span></div><p class="small muted">${esc(channels.facebook.message)}</p></div>
       </div>`;
   } catch (error) {
@@ -544,6 +554,21 @@ document.addEventListener('click', async (event) => {
       await navigator.clipboard.writeText(`${item.title}\n\n${item.description || ''}`.trim());
       toast('Texto copiado. Pégalo en TikTok.');
     } catch { toast('No pude copiar; selecciónalo a mano en el editor.'); }
+    return;
+  }
+  const tiktokBtn = event.target.closest('[data-tiktok]');
+  if (tiktokBtn) {
+    tiktokBtn.disabled = true;
+    tiktokBtn.textContent = 'Enviando…';
+    try {
+      await api('tiktok-send', { contentId: tiktokBtn.dataset.tiktok });
+      toast('Enviado a tu bandeja de TikTok: abre la notificación en la app y pulsa Publicar.', 7000);
+      await refresh();
+    } catch (error) {
+      toast(error.message, 8000);
+      tiktokBtn.disabled = false;
+      tiktokBtn.textContent = 'Enviar a TikTok';
+    }
     return;
   }
   const reject = event.target.closest('[data-reject]');
