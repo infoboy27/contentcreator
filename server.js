@@ -28,6 +28,11 @@ const tokenPath = path.join(dataDir, 'youtube-token.json');
 const youtubeChannelsDir = path.join(dataDir, 'youtube-channels');
 const statePath = path.join(dataDir, 'youtube-oauth-states.json');
 const tiktokTokenPath = path.join(dataDir, 'tiktok-token.json');
+// Ideas del dia generadas por la IA local (se preparan por adelantado; si falla se usan las listas fijas).
+const aiIdeasPath = path.join(dataDir, 'ai-ideas.json');
+const ideasProvider = String(process.env.IDEAS_PROVIDER || 'local').trim().toLowerCase();
+// Flujo de n8n que reenvia avisos al chat de Telegram (el token del bot solo vive en n8n).
+const telegramNotifyUrl = process.env.TELEGRAM_NOTIFY_URL || 'http://n8n:5678/webhook/contentcreator-notify';
 const publishLogPath = path.join(dataDir, 'publish-log.json');
 const videoPublishLogPath = path.join(dataDir, 'video-publish-log.json');
 const contentHistoryPath = path.join(dataDir, 'content-history.json');
@@ -427,7 +432,53 @@ async function sendVideoToTikTokInbox(filePath) {
   return { ok: true, mode: 'inbox', publish_id: init.publish_id, account: token.display_name || null, sent_at: new Date().toISOString(), reason: 'Enviado a tu bandeja de TikTok: abre la notificacion en la app y pulsa Publicar.' };
 }
 
+// Texto listo para pegar en TikTok: la API de bandeja no acepta titulo ni hashtags.
+function tiktokCaptionFor(video) {
+  const base = video.destinationId === 'religioso'
+    ? ['fe', 'dios', 'oracion', 'cristianos', 'jesus', 'biblia', 'reflexion', 'parati']
+    : ['peliculas', 'series', 'novelas', 'recomendaciones', 'cine', 'parati'];
+  const topic = significantTopicWords(video.idea || video.title || '').filter((word) => word.length >= 6 && !base.includes(word)).slice(0, 2);
+  const hook = String(video.hook || '').trim();
+  const bible = video.bible_reference ? ` (${video.bible_reference})` : '';
+  return [
+    String(video.title || video.idea || '').trim(),
+    hook ? `${hook}${bible}` : '',
+    [...topic, ...base].map((tag) => `#${tag}`).join(' '),
+  ].filter(Boolean).join('\n\n').slice(0, 2200);
+}
+
+async function notifyTelegram(html) {
+  try {
+    const response = await fetch(telegramNotifyUrl, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-internal-token': internalToken },
+      body: JSON.stringify({ text: html }),
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return true;
+  } catch (error) {
+    console.warn(`[telegram] no pude enviar el aviso: ${error.message}`);
+    return false;
+  }
+}
+
+function tiktokTelegramMessage(video, result) {
+  const caption = escapeHtml(tiktokCaptionFor(video));
+  const title = escapeHtml(video.title || video.idea || video.contentId);
+  const head = result.ok
+    ? `📲 <b>TikTok:</b> "${title}" ya está en tu bandeja.\nToca el texto para copiarlo, abre la notificación en TikTok, pégalo y pulsa Publicar:`
+    : `⚠️ <b>TikTok:</b> no pude enviar "${title}" a tu bandeja (${escapeHtml(result.error || result.reason || 'sin detalle')}).\nSúbelo a mano desde el Studio y pega este texto:`;
+  return `${head}\n\n<pre>${caption}</pre>`;
+}
+
 async function sendGeneratedVideoToTikTok(video) {
+  const result = await sendGeneratedVideoToTikTokInbox(video);
+  if (video.destinationId === 'religioso') await notifyTelegram(tiktokTelegramMessage(video, result));
+  return result;
+}
+
+async function sendGeneratedVideoToTikTokInbox(video) {
   if (video.destinationId !== 'religioso') return { skipped: true, reason: 'Este destino no tiene cuenta TikTok configurada.' };
   if (!tiktokClientKey || !readJson(tiktokTokenPath, null)?.refresh_token) {
     return { manual_required: true, reason: 'TikTok no esta conectado; usa el MP4 para carga manual.' };
@@ -644,6 +695,10 @@ function pickDailyIdeas(destinationId, items, count = 3, referenceDate = Date.no
   if (!Number.isFinite(referenceTime)) throw new Error('Fecha de plan invalida.');
   const dayIndex = Math.floor(referenceTime / 86_400_000);
   const planDayStart = dayIndex * 86_400_000;
+  if (ideasProvider === 'local') {
+    const cached = readJson(aiIdeasPath, {})[new Date(planDayStart).toISOString().slice(0, 10)]?.[destinationId];
+    if (Array.isArray(cached) && cached.length >= count) return cached.slice(0, count);
+  }
   const recent = recentContentKeys(destinationId, 7, planDayStart);
   const ordered = items.map((item, index) => items[((dayIndex * count) + index) % items.length]);
   const fresh = ordered.filter((item) => !recent.has(normalizeContentKey(item)));
@@ -3050,6 +3105,119 @@ const weeklyTopicBanks = {
   ],
 };
 
+// --- Ideas con IA local: solo para los destinos con video. Se generan con un dia de anticipacion,
+// cuando no hay un video en produccion, y quedan fijas para ese dia (GENERAR ... 2 siempre es la misma idea).
+const aiIdeaChannels = {
+  religioso: {
+    count: 6,
+    description: 'Vida con Dios: canal cristiano de reflexiones breves (60-90 segundos) para personas que buscan fe, esperanza y paz en su vida diaria. Tono pastoral, cercano y practico; cada video desarrolla una sola idea con apoyo de un pasaje biblico.',
+  },
+  fanspeliculas: {
+    count: 3,
+    description: 'Fans Peliculas y Novelas: videos cortos de recomendaciones, curiosidades y analisis de peliculas, series y telenovelas para fans latinos. Tono entretenido y cercano; sin spoilers graves ni violencia grafica.',
+  },
+};
+let aiIdeasRunning = false;
+
+async function requestIdeasLocal(prompt) {
+  const response = await fetch(`${ollamaBaseUrl}/api/chat`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model: ollamaScriptModel,
+      messages: [
+        { role: 'system', content: 'Eres un estratega de contenido para videos cortos en espanol latino. Respondes solo con JSON valido.' },
+        { role: 'user', content: prompt },
+      ],
+      format: { type: 'object', properties: { ideas: { type: 'array', items: { type: 'string' } } }, required: ['ideas'] },
+      think: false,
+      stream: false,
+      keep_alive: 0,
+      options: { temperature: 0.9, num_predict: 900, num_ctx: 4096 },
+    }),
+    signal: AbortSignal.timeout(5 * 60 * 1000),
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(`Ollama respondio HTTP ${response.status}: ${payload.error || ''}`);
+  return JSON.parse(payload.message?.content || '{}').ideas || [];
+}
+
+async function generateAiIdeas(destinationId, dateKey) {
+  const { count, description } = aiIdeaChannels[destinationId];
+  const bank = weeklyTopicBanks[destinationId];
+  const stored = readJson(aiIdeasPath, {});
+  const since = Date.parse(dateKey) - 30 * 86_400_000;
+  const recentTitles = readContentHistory()
+    .filter((item) => item.destinationId === destinationId && Date.parse(item.created_at || item.generated_at || '') >= since)
+    .map((item) => item.idea || item.title)
+    .concat(Object.entries(stored).filter(([day]) => day !== dateKey && Date.parse(day) >= since).flatMap(([, day]) => day[destinationId] || []));
+  const examples = [...bank].sort(() => Math.random() - 0.5).slice(0, 8);
+  const avoid = new Set([...recentTitles, ...examples].map(normalizeContentKey));
+  // Parecida = comparte la mayoria de sus palabras clave con un ejemplo o un tema reciente.
+  const seenWords = [...recentTitles, ...bank].map(significantTopicWords).filter((words) => words.length);
+  const tooSimilar = (idea) => {
+    const words = significantTopicWords(idea);
+    return seenWords.some((other) => {
+      const shared = words.filter((word) => other.includes(word)).length;
+      return shared >= 2 && shared / Math.min(words.length, other.length) >= 0.6;
+    });
+  };
+  const prompt = [
+    `Canal: ${description}`,
+    `Propon ${count + 4} temas NUEVOS para videos de hoy. Cada tema es una frase corta (entre 4 y 12 palabras), concreta y con un angulo claro, como un titulo atractivo.`,
+    'Varia el tipo de tema: emociones, situaciones cotidianas, preguntas que la gente se hace, consejos practicos.',
+    'Sin numeracion, sin comillas, sin emojis, sin hashtags y sin dos puntos al inicio.',
+    'Escribe con ortografia perfecta y todas las tildes (por ejemplo: Por qué, Cómo, Qué, música, película). Cada tema sera el titulo publico del video.',
+    `Ejemplos del estilo (NO los copies ni los reformules; inventa temas distintos):\n- ${examples.join('\n- ')}`,
+    recentTitles.length ? `Temas ya usados en los ultimos 30 dias (no los repitas ni hagas variaciones obvias):\n- ${[...new Set(recentTitles)].slice(-40).join('\n- ')}` : '',
+  ].filter(Boolean).join('\n\n');
+  const ideas = [];
+  for (const raw of await requestIdeasLocal(prompt)) {
+    const idea = polishSpanishText(String(raw || '').replace(/^[\s\-*\d.)]+/, '').replace(/["“”#*]/g, '').replace(/\s+/g, ' ').trim())
+      .replace(/[.]+$/, '')
+      .replace(/^Por que\b/, 'Por qué').replace(/^Como\b/, 'Cómo').replace(/^Que\b/, 'Qué').replace(/^Cual(es)?\b/, (word) => word.replace('Cual', 'Cuál'));
+    const key = normalizeContentKey(idea);
+    if (idea.length < 15 || idea.length > 90 || avoid.has(key) || tooSimilar(idea) || ideas.some((item) => normalizeContentKey(item) === key)) continue;
+    try { assertAllowedText(idea); } catch { continue; }
+    ideas.push(idea);
+    if (ideas.length === count) break;
+  }
+  // Si el modelo dio pocas ideas validas, se completa con las listas fijas que no se usaron hace poco.
+  for (const item of bank) {
+    if (ideas.length >= count) break;
+    if (!avoid.has(normalizeContentKey(item)) && !ideas.includes(item)) ideas.push(item);
+  }
+  return ideas.slice(0, count);
+}
+
+async function refreshAiIdeas() {
+  if (ideasProvider !== 'local' || aiIdeasRunning || activeVideoJob) return;
+  aiIdeasRunning = true;
+  try {
+    const today = Math.floor(Date.now() / 86_400_000) * 86_400_000;
+    // Solo manana: las de hoy ya se anunciaron en el plan de la manana y no deben cambiar a mitad del dia.
+    for (const dateKey of [new Date(today + 86_400_000).toISOString().slice(0, 10)]) {
+      for (const destinationId of Object.keys(aiIdeaChannels)) {
+        if (activeVideoJob) return;
+        if (readJson(aiIdeasPath, {})[dateKey]?.[destinationId]) continue;
+        try {
+          const ideas = await generateAiIdeas(destinationId, dateKey);
+          const stored = readJson(aiIdeasPath, {});
+          stored[dateKey] = { ...(stored[dateKey] || {}), [destinationId]: ideas };
+          const cutoff = new Date(today - 30 * 86_400_000).toISOString().slice(0, 10);
+          for (const day of Object.keys(stored)) if (day < cutoff) delete stored[day];
+          writeJson(aiIdeasPath, stored);
+          console.log(`[ideas] ${dateKey} ${destinationId}: ${ideas.join(' | ')}`);
+        } catch (error) {
+          console.warn(`[ideas] ${dateKey} ${destinationId}: fallo la IA local (${error.message}); se reintenta luego`);
+        }
+      }
+    }
+  } finally {
+    aiIdeasRunning = false;
+  }
+}
+
 function buildMultiplatformPlan(referenceDate = new Date()) {
   const planDate = new Date(referenceDate);
   if (!Number.isFinite(planDate.getTime())) throw new Error('Fecha de plan invalida.');
@@ -3970,6 +4138,7 @@ function studioState() {
         available: Boolean(generated),
         youtubeUrl: item.publish_result?.youtube?.url || null,
         tiktokSent: Boolean(item.publish_result?.tiktok?.ok),
+        tiktokCaption: tiktokCaptionFor({ ...metadata, title: item.title || metadata.title }),
         title: item.title || metadata.title,
         description: item.description || metadata.description,
         tags: youtubeTagsFor(metadata.destinationId),
@@ -4711,6 +4880,8 @@ if (require.main === module) {
   }).listen(process.env.PORT || 3000, () => {
     console.log(`ContentCreator listening on ${process.env.PORT || 3000}`);
   });
+  setTimeout(refreshAiIdeas, 60_000);
+  setInterval(refreshAiIdeas, 30 * 60_000);
 }
 
 module.exports = {
@@ -4723,4 +4894,9 @@ module.exports = {
   videoDeliveryStatus,
   videoGenerationContext,
   wordCount,
+  tiktokCaptionFor,
+  tiktokTelegramMessage,
+  notifyTelegram,
+  generateAiIdeas,
+  refreshAiIdeas,
 };

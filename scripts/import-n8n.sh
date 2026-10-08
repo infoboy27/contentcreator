@@ -6,7 +6,7 @@ STACK="$ROOT/scripts/stack.sh"
 env_value() { grep -E "^$1=" "$ROOT/.env" | cut -d= -f2- || true; }
 
 # Los mismos que están activos en el servidor de referencia.
-ACTIVE=(contentCreatorTelegramRouter01 contentGrowthTelegramDaily01 errorNotifierTelegram01 multiplatformContentPlanDaily01 multiplatformVideoTelegram01)
+ACTIVE=(contentCreatorTelegramRouter01 contentCreatorNotifyTelegram01 contentGrowthTelegramDaily01 errorNotifierTelegram01 multiplatformContentPlanDaily01 multiplatformVideoTelegram01)
 
 "$STACK" exec -T n8n n8n import:workflow --separate --input=/workflows
 for id in "${ACTIVE[@]}"; do

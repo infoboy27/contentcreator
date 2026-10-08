@@ -551,7 +551,7 @@ document.addEventListener('click', async (event) => {
   if (copy) {
     const item = state.items.find((v) => v.contentId === copy.dataset.copy);
     try {
-      await navigator.clipboard.writeText(`${item.title}\n\n${item.description || ''}`.trim());
+      await navigator.clipboard.writeText(item.tiktokCaption || `${item.title}\n\n${item.description || ''}`.trim());
       toast('Texto copiado. Pégalo en TikTok.');
     } catch { toast('No pude copiar; selecciónalo a mano en el editor.'); }
     return;
