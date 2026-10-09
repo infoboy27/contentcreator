@@ -1129,6 +1129,9 @@ const studioSettingsDefaults = {
   voiceNatural: true,
   sentencePause: 0.22,
   scenePause: 0.45,
+  // Realismo (apagados por defecto): look de pelicula y clips reales de Pixabay como tomas de apoyo.
+  cinematicLook: false,
+  realClips: false,
 };
 let studioSettingsCache = null;
 
@@ -1161,6 +1164,18 @@ function localVoiceFor(destinationId) {
   };
 }
 const videoFps = 30;
+const pixabayApiKey = process.env.PIXABAY_API_KEY || '';
+// Look de pelicula: leve camara en mano, menos nitidez, color de cine, vineta y grano.
+const cinematicLookFilter = [
+  "crop=1036:1842:x='22+9*sin(t*1.3)+4*sin(t*3.7)':y='39+8*sin(t*1.1+1)+4*sin(t*2.9)'",
+  'scale=1080:1920:flags=bicubic',
+  'gblur=sigma=0.45',
+  'eq=contrast=1.05:saturation=0.9:gamma=0.98',
+  "curves=all='0/0.04 0.5/0.5 1/0.96'",
+  'colorbalance=rs=0.03:bs=-0.02:rh=0.02:bh=-0.03',
+  'vignette=PI/5',
+  'noise=alls=9:allf=t+u',
+].join(',');
 
 let activeVideoJob = null;
 let lastVideoJob = null;
@@ -1813,6 +1828,93 @@ async function reviewSceneImage(imagePath, scene) {
   return { ...review, passed: review.matches !== false && !review.has_text && !review.deformed };
 }
 
+const stockQueriesSchema = {
+  type: 'object',
+  properties: { queries: { type: 'array', items: { type: 'string' } } },
+  required: ['queries'],
+};
+const stockFrameSchema = {
+  type: 'object',
+  properties: { shows: { type: 'string' }, has_text: { type: 'boolean' }, fits: { type: 'boolean' } },
+  required: ['shows', 'has_text', 'fits'],
+};
+// El modelo a veces describe un logo y aun asi lo aprueba: se descarta por la descripcion misma.
+const stockTextPattern = /\b(logos?|text|letters?|words?|signs?|signage|brand(ed|s)?|watermarks?|captions?|writing|written)\b|['"“‘][^'"”’]{2,}['"”’]/i;
+const stockCreaturePattern = /\b(insects?|mantis|bees?|animals?|bugs?|spiders?|butterfl(y|ies))\b/i;
+
+async function askLocalJson(content, schema, images) {
+  const response = await fetch(`${ollamaBaseUrl}/api/chat`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model: ollamaScriptModel,
+      messages: [{ role: 'user', content, ...(images ? { images } : {}) }],
+      format: schema,
+      think: false,
+      stream: false,
+      options: { temperature: 0, num_predict: 300 },
+    }),
+    signal: AbortSignal.timeout(3 * 60 * 1000),
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(`Ollama HTTP ${response.status}`);
+  return JSON.parse(payload.message?.content || '{}');
+}
+
+// Busca en Pixabay un clip real que sirva de toma de apoyo (sin caras: detalles, manos, luz, lugares).
+// La protagonista sigue siendo la imagen IA; si nada encaja de verdad, devuelve null y queda la imagen.
+async function findStockClip(scene, minSeconds, usedIds, workDir) {
+  const visual = scene.visual.split('. The person is')[0];
+  const { queries = [] } = await askLocalJson([
+    `Scene of a short video: "${visual}"`,
+    'Give 3 different 1-3 word English search queries for REAL stock B-roll video clips (Pixabay) that would fit this moment, from most specific to most generic.',
+    'Use objects, close-up details, hands, light or places, NEVER words like woman/man/person/girl.',
+    'Examples: "open bible pages", "praying hands", "sunlight window", "car steering wheel", "city street evening". JSON.',
+  ].join('\n'), stockQueriesSchema);
+  const framePath = path.join(workDir, 'stock-review.jpg');
+  const tinyPath = path.join(workDir, 'stock-review.mp4');
+  try {
+    for (const query of queries.slice(0, 3)) {
+      const url = `https://pixabay.com/api/videos/?key=${pixabayApiKey}&q=${encodeURIComponent(query)}&per_page=12&safesearch=true&video_type=film`;
+      const response = await fetch(url, { signal: AbortSignal.timeout(30_000) });
+      if (!response.ok) throw new Error(`Pixabay HTTP ${response.status}`);
+      const { hits = [] } = await response.json();
+      const words = query.toLowerCase().split(/\s+/)
+        .filter((word) => word.length > 3 && !['close-up', 'closeup'].includes(word))
+        .map((word) => word.replace(/(ing|s)$/, ''));
+      const candidates = hits
+        .filter((hit) => !usedIds.has(hit.id) && hit.duration >= minSeconds + 1.5)
+        // Solo 4K horizontal o video vertical: al recortar a 9:16 no se pierde nitidez.
+        .filter((hit) => hit.videos.large.width >= 3840 || hit.videos.medium.height > hit.videos.medium.width)
+        // "praying hands" trae mantis religiosas: sin bichos salvo que se pidan.
+        .filter((hit) => stockCreaturePattern.test(hit.tags) === stockCreaturePattern.test(query))
+        .filter((hit) => words.filter((word) => hit.tags.toLowerCase().includes(word)).length >= Math.ceil(words.length / 2))
+        .slice(0, 4);
+      for (const hit of candidates) {
+        // La miniatura de Pixabay es el primer cuadro (a veces negro): se revisa un cuadro del medio.
+        const tiny = await fetch(hit.videos.tiny.url, { signal: AbortSignal.timeout(60_000) });
+        if (!tiny.ok) continue;
+        fs.writeFileSync(tinyPath, Buffer.from(await tiny.arrayBuffer()));
+        await runCommand('ffmpeg', ['-y', '-v', 'error', '-ss', String(Math.min(3, hit.duration / 2)), '-i', tinyPath, '-frames:v', '1', '-vf', 'scale=448:-2', framePath]);
+        const review = await askLocalJson([
+          'Frame from a stock video. First describe in a few words what it literally shows.',
+          `Then: fits = true only if it clearly shows "${query}" and would work as B-roll for: "${visual}".`,
+          'has_text: true if any logo, brand name, sign or readable words are visible.',
+          'Animals or insects instead of people = false. Any logo or visible text = false. JSON.',
+        ].join('\n'), stockFrameSchema, [fs.readFileSync(framePath).toString('base64')]);
+        if (review.fits && !review.has_text && !stockTextPattern.test(review.shows || '')) {
+          const video = hit.videos.medium.height > hit.videos.medium.width ? hit.videos.medium : hit.videos.large;
+          return { id: hit.id, query, url: video.url, pageURL: hit.pageURL, user: hit.user, duration: hit.duration, shows: review.shows };
+        }
+      }
+    }
+    return null;
+  } finally {
+    fs.rmSync(framePath, { force: true });
+    fs.rmSync(tinyPath, { force: true });
+  }
+}
+
 const shotMotions = ['zoomin', 'panup', 'zoomout', 'panright', 'pandown', 'panleft'];
 
 function shotFilter(motion, frames) {
@@ -1952,6 +2054,8 @@ async function renderAutomatedVideo({
   supersedesContentId = null,
   test = false,
   forceLocal = false,
+  cinematicLook = studioSettings().cinematicLook,
+  realClips = studioSettings().realClips,
 }) {
   const stamp = new Date().toISOString().replace(/[-:]/g, '').slice(0, 15);
   const slug = `auto-${stamp}-${destination.id}-${ideaIndex + 1}`.replace(/[^a-z0-9-]+/g, '-');
@@ -2078,14 +2182,41 @@ ${buildKaraokeEvents(timedWords).join('\n')}
       scene.reviewPassed = imageReviews.some((review) => review.scene === index + 1 && review.passed);
     }
   }
+  // Clips reales: la segunda toma de cada escena larga puede ser un clip de Pixabay (toma de apoyo).
+  const stockClips = [];
+  if (realClips && pixabayApiKey) {
+    const usedIds = new Set();
+    for (const [index, shot] of shots.entries()) {
+      if (stockClips.length >= 5 || shots[index - 1]?.scene !== shot.scene) continue;
+      logStep(`buscando clip real para la escena ${shot.scene + 1}`);
+      try {
+        const clip = await findStockClip(scenes[shot.scene], shot.end - shot.start, usedIds, workDir);
+        if (!clip) continue;
+        const sourcePath = path.join(workDir, `stock-${clip.id}.mp4`);
+        const download = await fetch(clip.url, { signal: AbortSignal.timeout(3 * 60 * 1000) });
+        if (!download.ok) throw new Error(`descarga HTTP ${download.status}`);
+        fs.writeFileSync(sourcePath, Buffer.from(await download.arrayBuffer()), { mode: 0o600 });
+        usedIds.add(clip.id);
+        shot.stockPath = sourcePath;
+        stockClips.push({ scene: shot.scene + 1, id: clip.id, query: clip.query, shows: clip.shows, page_url: clip.pageURL, user: clip.user });
+        logStep(`escena ${shot.scene + 1}: clip real "${clip.query}" (${clip.pageURL})`);
+      } catch (error) {
+        logStep(`clip real no disponible para la escena ${shot.scene + 1}: ${error.message}`);
+      }
+    }
+  } else if (realClips) {
+    logStep('clips reales activados pero falta PIXABAY_API_KEY; se usan solo imagenes');
+  }
   logStep(`animando ${shots.length} tomas`);
   for (const [index, shot] of shots.entries()) {
     const frames = Math.max(2, Math.round(shot.end * videoFps) - Math.round(shot.start * videoFps));
     const clipPath = path.join(workDir, `shot-${String(index + 1).padStart(2, '0')}.mp4`);
+    const input = shot.stockPath
+      ? ['-ss', '1', '-i', shot.stockPath, '-vf', `scale=1080:1920:force_original_aspect_ratio=increase:flags=lanczos,crop=1080:1920,fps=${videoFps},format=yuv420p`]
+      : ['-i', scenes[shot.scene].imagePath, '-vf', shotFilter(shotMotions[index % shotMotions.length], frames)];
     await runCommand('ffmpeg', [
       '-y', '-v', 'error',
-      '-i', scenes[shot.scene].imagePath,
-      '-vf', shotFilter(shotMotions[index % shotMotions.length], frames),
+      ...input,
       '-frames:v', String(frames),
       '-an',
       '-c:v', 'libx264',
@@ -2106,7 +2237,9 @@ ${buildKaraokeEvents(timedWords).join('\n')}
   await runCommand('ffmpeg', ['-y', '-v', 'error', '-f', 'concat', '-safe', '0', '-i', concatPath, '-c', 'copy', baseVideoPath]);
 
   logStep('montaje final');
+  // El look va antes de los subtitulos para que el texto no tiemble ni tenga grano.
   const filter = [
+    ...(cinematicLook ? [cinematicLookFilter] : []),
     `ass=${ffmpegPath(assPath)}`,
     'fade=t=in:st=0:d=0.25',
     `fade=t=out:st=${(duration - 0.4).toFixed(2)}:d=0.4`,
@@ -2187,6 +2320,8 @@ ${buildKaraokeEvents(timedWords).join('\n')}
     bible_reference: narration.bibleReference,
     bible_reference_inserted: narration.bibleReferenceInserted,
     image_reviews: imageReviews,
+    cinematic_look: cinematicLook,
+    stock_clips: stockClips,
     render_seconds: Math.round((Date.now() - startedAt) / 1000),
     generation_version: generationVersion,
     supersedes_content_id: supersedesContentId,
@@ -2219,7 +2354,7 @@ ${buildKaraokeEvents(timedWords).join('\n')}
   };
   writeJson(metaPath, result);
   // Los intermedios pesan ~60 MB por video; se conservan las imagenes, el guion y la voz final.
-  for (const file of [...sceneFiles, baseVideoPath, concatPath, ...scenes.map((scene) => scene.wavPath)]) {
+  for (const file of [...sceneFiles, baseVideoPath, concatPath, ...scenes.map((scene) => scene.wavPath), ...shots.map((shot) => shot.stockPath).filter(Boolean)]) {
     fs.rmSync(file, { force: true });
   }
   logStep(`listo ${outputName} en ${result.render_seconds}s`);
@@ -4206,6 +4341,8 @@ async function saveStudioSettings(body) {
     voiceNatural: body.voiceNatural === undefined ? current.voiceNatural : Boolean(body.voiceNatural),
     sentencePause: clamp(body.sentencePause, 0, 0.6, current.sentencePause),
     scenePause: clamp(body.scenePause, 0.2, 1, current.scenePause),
+    cinematicLook: body.cinematicLook === undefined ? current.cinematicLook : Boolean(body.cinematicLook),
+    realClips: body.realClips === undefined ? current.realClips : Boolean(body.realClips),
   };
   if (body.voiceModel) {
     const model = (await studioVoiceModels()).find((candidate) => candidate.id === body.voiceModel);

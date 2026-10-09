@@ -186,6 +186,10 @@ ol.steps li { margin-bottom: 4px; }
           <label class="field"><span>Pausa entre frases (s)</span><div class="range"><input type="range" id="sentencePause" min="0" max="0.6" step="0.02"><output></output></div></label>
           <label class="field"><span>Pausa entre escenas (s)</span><div class="range"><input type="range" id="scenePause" min="0.2" max="1" step="0.05"><output></output></div></label>
           <label class="row" style="margin-bottom:16px"><input type="checkbox" id="voiceNatural"> <span>Procesar la voz para que suene más natural (ecualización y sala)</span></label>
+          <h2 style="margin-top:20px">Realismo</h2>
+          <label class="row" style="margin-bottom:8px"><input type="checkbox" id="cinematicLook"> <span>Look cine: grano, color de película y leve cámara en mano</span></label>
+          <label class="row" style="margin-bottom:8px"><input type="checkbox" id="realClips"> <span>Clips reales: tomas de apoyo de Pixabay (manos, Biblia, luz, lugares) entre las imágenes IA</span></label>
+          <p class="small muted" style="margin-bottom:16px">Si no hay un clip que encaje, se usa la imagen IA como siempre. Prueba primero con “Generar prueba”.</p>
           <button class="btn primary" id="saveSettings">Guardar ajustes</button>
         </div>
         <div class="card">
@@ -608,6 +612,8 @@ async function renderSettings() {
   bindRange('sentencePause', s.sentencePause);
   bindRange('scenePause', s.scenePause);
   $('#voiceNatural').checked = s.voiceNatural;
+  $('#cinematicLook').checked = Boolean(s.cinematicLook);
+  $('#realClips').checked = Boolean(s.realClips);
   try {
     const { voices } = await api('voices');
     $('#voiceModel').innerHTML = voices.map((v) => `<option value="${esc(v.id)}" ${v.id === s.voiceModel ? 'selected' : ''}>${esc(v.id.replace('speaches-ai/piper-', ''))}</option>`).join('');
@@ -626,6 +632,8 @@ $('#saveSettings').addEventListener('click', async () => {
       sentencePause: Number($('#sentencePause').value),
       scenePause: Number($('#scenePause').value),
       voiceNatural: $('#voiceNatural').checked,
+      cinematicLook: $('#cinematicLook').checked,
+      realClips: $('#realClips').checked,
     });
     state.settings = result.settings;
     toast('Ajustes guardados. Se aplican al próximo video.');
