@@ -1861,36 +1861,61 @@ async function askLocalJson(content, schema, images) {
   return JSON.parse(payload.message?.content || '{}');
 }
 
+// Clips de Pixabay ya usados en videos anteriores (metadata.json se conserva aunque se borre el mp4),
+// para no repetir la misma toma de apoyo de un video a otro.
+function previouslyUsedStockClipIds() {
+  const ids = new Set();
+  const videosDir = path.join(dataDir, 'generated-videos');
+  for (const entry of fs.existsSync(videosDir) ? fs.readdirSync(videosDir, { withFileTypes: true }) : []) {
+    if (!entry.isDirectory()) continue;
+    try {
+      const metadata = JSON.parse(fs.readFileSync(path.join(videosDir, entry.name, 'metadata.json'), 'utf8'));
+      for (const clip of metadata.stock_clips || []) ids.add(clip.id);
+    } catch {}
+  }
+  return ids;
+}
+
 // Busca en Pixabay un clip real que sirva de toma de apoyo (sin caras: detalles, manos, luz, lugares).
 // La protagonista sigue siendo la imagen IA; si nada encaja de verdad, devuelve null y queda la imagen.
-async function findStockClip(scene, minSeconds, usedIds, workDir) {
+// trace (opcional) recibe el embudo de cada busqueda para diagnosticar por que no hubo clip.
+async function findStockClip(scene, minSeconds, usedIds, workDir, trace = null) {
   const visual = scene.visual.split('. The person is')[0];
   const { queries = [] } = await askLocalJson([
     `Scene of a short video: "${visual}"`,
-    'Give 3 different 1-3 word English search queries for REAL stock B-roll video clips (Pixabay) that would fit this moment, from most specific to most generic.',
-    'Use objects, close-up details, hands, light or places, NEVER words like woman/man/person/girl.',
-    'Examples: "open bible pages", "praying hands", "sunlight window", "car steering wheel", "city street evening". JSON.',
+    'Give 4 different 1-3 word English search queries for REAL stock B-roll video clips (Pixabay) that would fit this moment.',
+    'The first 3 go from specific to generic, about objects, hands or the place of the scene; the 4th is a calm light shot that works anywhere (sunlight window, light through leaves, sky clouds, candle flame).',
+    'Use objects, close-up details, hands, light or places. NEVER words for people or their clothing (woman, man, person, girl, sweater, shirt, jeans, trousers, dress).',
+    'Examples: "open bible pages", "praying hands", "sunlight window", "car steering wheel", "city street evening", "sunrise clouds". JSON.',
   ].join('\n'), stockQueriesSchema);
   const framePath = path.join(workDir, 'stock-review.jpg');
   const tinyPath = path.join(workDir, 'stock-review.mp4');
+  let reviewed = 0;
   try {
-    for (const query of queries.slice(0, 3)) {
-      const url = `https://pixabay.com/api/videos/?key=${pixabayApiKey}&q=${encodeURIComponent(query)}&per_page=12&safesearch=true&video_type=film`;
+    for (const query of queries.slice(0, 4)) {
+      if (reviewed >= 10) break;
+      const url = `https://pixabay.com/api/videos/?key=${pixabayApiKey}&q=${encodeURIComponent(query)}&per_page=40&safesearch=true&video_type=film`;
       const response = await fetch(url, { signal: AbortSignal.timeout(30_000) });
       if (!response.ok) throw new Error(`Pixabay HTTP ${response.status}`);
       const { hits = [] } = await response.json();
       const words = query.toLowerCase().split(/\s+/)
         .filter((word) => word.length > 3 && !['close-up', 'closeup'].includes(word))
         .map((word) => word.replace(/(ing|s)$/, ''));
-      const candidates = hits
-        .filter((hit) => !usedIds.has(hit.id) && hit.duration >= minSeconds + 1.5)
-        // Solo 4K horizontal o video vertical: al recortar a 9:16 no se pierde nitidez.
-        .filter((hit) => hit.videos.large.width >= 3840 || hit.videos.medium.height > hit.videos.medium.width)
-        // "praying hands" trae mantis religiosas: sin bichos salvo que se pidan.
-        .filter((hit) => stockCreaturePattern.test(hit.tags) === stockCreaturePattern.test(query))
-        .filter((hit) => words.filter((word) => hit.tags.toLowerCase().includes(word)).length >= Math.ceil(words.length / 2))
-        .slice(0, 4);
-      for (const hit of candidates) {
+      const step = { query, hits: hits.length };
+      let candidates = hits.filter((hit) => !usedIds.has(hit.id) && hit.duration >= minSeconds + 1.5);
+      step.fresh = candidates.length;
+      // 2560px o mas (o video vertical): al recortar a 9:16 casi no se pierde nitidez.
+      candidates = candidates.filter((hit) => hit.videos.large.width >= 2560 || hit.videos.medium.height > hit.videos.medium.width);
+      step.sharp = candidates.length;
+      // "praying hands" trae mantis religiosas: sin bichos salvo que se pidan.
+      candidates = candidates.filter((hit) => stockCreaturePattern.test(hit.tags) === stockCreaturePattern.test(query));
+      candidates = candidates.filter((hit) => words.filter((word) => hit.tags.toLowerCase().includes(word)).length >= Math.ceil(words.length / 2));
+      step.tagged = candidates.length;
+      step.reviews = [];
+      trace?.push(step);
+      for (const hit of candidates.slice(0, 4)) {
+        if (reviewed >= 10) break;
+        reviewed += 1;
         // La miniatura de Pixabay es el primer cuadro (a veces negro): se revisa un cuadro del medio.
         const tiny = await fetch(hit.videos.tiny.url, { signal: AbortSignal.timeout(60_000) });
         if (!tiny.ok) continue;
@@ -1898,11 +1923,14 @@ async function findStockClip(scene, minSeconds, usedIds, workDir) {
         await runCommand('ffmpeg', ['-y', '-v', 'error', '-ss', String(Math.min(3, hit.duration / 2)), '-i', tinyPath, '-frames:v', '1', '-vf', 'scale=448:-2', framePath]);
         const review = await askLocalJson([
           'Frame from a stock video. First describe in a few words what it literally shows.',
-          `Then: fits = true only if it clearly shows "${query}" and would work as B-roll for: "${visual}".`,
+          `Then: fits = true if it shows "${query}" (or something very close) and would work as a mood B-roll shot for: "${visual}".`,
           'has_text: true if any logo, brand name, sign or readable words are visible.',
+          'fits = false if it shows a specific place that clearly contradicts where the scene happens (e.g. beach, ocean, mountains or an aerial city view when the scene is inside an office, home or car).',
           'Animals or insects instead of people = false. Any logo or visible text = false. JSON.',
         ].join('\n'), stockFrameSchema, [fs.readFileSync(framePath).toString('base64')]);
-        if (review.fits && !review.has_text && !stockTextPattern.test(review.shows || '')) {
+        const ok = review.fits && !review.has_text && !stockTextPattern.test(review.shows || '');
+        step.reviews.push({ id: hit.id, shows: review.shows, fits: review.fits, has_text: review.has_text, ok });
+        if (ok) {
           const video = hit.videos.medium.height > hit.videos.medium.width ? hit.videos.medium : hit.videos.large;
           return { id: hit.id, query, url: video.url, pageURL: hit.pageURL, user: hit.user, duration: hit.duration, shows: review.shows };
         }
@@ -2185,9 +2213,9 @@ ${buildKaraokeEvents(timedWords).join('\n')}
   // Clips reales: la segunda toma de cada escena larga puede ser un clip de Pixabay (toma de apoyo).
   const stockClips = [];
   if (realClips && pixabayApiKey) {
-    const usedIds = new Set();
+    const usedIds = previouslyUsedStockClipIds();
     for (const [index, shot] of shots.entries()) {
-      if (stockClips.length >= 5 || shots[index - 1]?.scene !== shot.scene) continue;
+      if (stockClips.length >= 6 || shots[index - 1]?.scene !== shot.scene) continue;
       logStep(`buscando clip real para la escena ${shot.scene + 1}`);
       try {
         const clip = await findStockClip(scenes[shot.scene], shot.end - shot.start, usedIds, workDir);
@@ -5023,6 +5051,7 @@ if (require.main === module) {
 
 module.exports = {
   buildMultiplatformPlan,
+  findStockClip,
   generateQualifiedVideoPlan,
   renderAutomatedVideo,
   parseVideoCommand,
