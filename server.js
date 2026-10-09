@@ -1165,6 +1165,7 @@ function localVoiceFor(destinationId) {
 }
 const videoFps = 30;
 const pixabayApiKey = process.env.PIXABAY_API_KEY || '';
+const realClipsDestinations = ['religioso'];
 // Look de pelicula: leve camara en mano, menos nitidez, color de cine, vineta y grano.
 const cinematicLookFilter = [
   "crop=1036:1842:x='22+9*sin(t*1.3)+4*sin(t*3.7)':y='39+8*sin(t*1.1+1)+4*sin(t*2.9)'",
@@ -1835,11 +1836,13 @@ const stockQueriesSchema = {
 };
 const stockFrameSchema = {
   type: 'object',
-  properties: { shows: { type: 'string' }, has_text: { type: 'boolean' }, fits: { type: 'boolean' } },
-  required: ['shows', 'has_text', 'fits'],
+  properties: { shows: { type: 'string' }, has_text: { type: 'boolean' }, is_animation: { type: 'boolean' }, fits: { type: 'boolean' } },
+  required: ['shows', 'has_text', 'is_animation', 'fits'],
 };
 // El modelo a veces describe un logo y aun asi lo aprueba: se descarta por la descripcion misma.
 const stockTextPattern = /\b(logos?|text|letters?|words?|signs?|signage|brand(ed|s)?|watermarks?|captions?|writing|written)\b|['"“‘][^'"”’]{2,}['"”’]/i;
+// video_type=film aun trae renders 3D e ilustraciones animadas.
+const stockAnimationPattern = /\b(animation|animated|3d|render|rendering|cgi|illustration|cartoon|motion graphics?|loop(able)?|digital art)\b/i;
 const stockCreaturePattern = /\b(insects?|mantis|bees?|animals?|bugs?|spiders?|butterfl(y|ies))\b/i;
 
 async function askLocalJson(content, schema, images) {
@@ -1909,6 +1912,7 @@ async function findStockClip(scene, minSeconds, usedIds, workDir, trace = null) 
       step.sharp = candidates.length;
       // "praying hands" trae mantis religiosas: sin bichos salvo que se pidan.
       candidates = candidates.filter((hit) => stockCreaturePattern.test(hit.tags) === stockCreaturePattern.test(query));
+      candidates = candidates.filter((hit) => !stockAnimationPattern.test(hit.tags));
       candidates = candidates.filter((hit) => words.filter((word) => hit.tags.toLowerCase().includes(word)).length >= Math.ceil(words.length / 2));
       step.tagged = candidates.length;
       step.reviews = [];
@@ -1926,10 +1930,11 @@ async function findStockClip(scene, minSeconds, usedIds, workDir, trace = null) 
           `Then: fits = true if it shows "${query}" (or something very close) and would work as a mood B-roll shot for: "${visual}".`,
           'has_text: true if any logo, brand name, sign or readable words are visible.',
           'fits = false if it shows a specific place that clearly contradicts where the scene happens (e.g. beach, ocean, mountains or an aerial city view when the scene is inside an office, home or car).',
+          'is_animation: true if it is an animation, 3D render or illustration (not real filmed footage).',
           'Animals or insects instead of people = false. Any logo or visible text = false. JSON.',
         ].join('\n'), stockFrameSchema, [fs.readFileSync(framePath).toString('base64')]);
-        const ok = review.fits && !review.has_text && !stockTextPattern.test(review.shows || '');
-        step.reviews.push({ id: hit.id, shows: review.shows, fits: review.fits, has_text: review.has_text, ok });
+        const ok = review.fits && !review.has_text && !review.is_animation && !stockTextPattern.test(review.shows || '');
+        step.reviews.push({ id: hit.id, shows: review.shows, fits: review.fits, has_text: review.has_text, is_animation: review.is_animation, ok });
         if (ok) {
           const video = hit.videos.medium.height > hit.videos.medium.width ? hit.videos.medium : hit.videos.large;
           return { id: hit.id, query, url: video.url, pageURL: hit.pageURL, user: hit.user, duration: hit.duration, shows: review.shows };
@@ -2083,7 +2088,8 @@ async function renderAutomatedVideo({
   test = false,
   forceLocal = false,
   cinematicLook = studioSettings().cinematicLook,
-  realClips = studioSettings().realClips,
+  // En peliculas los clips de stock quedaban de relleno (nubes, luz): solo se usan en Vida con Dios.
+  realClips = studioSettings().realClips && realClipsDestinations.includes(destination.id),
 }) {
   const stamp = new Date().toISOString().replace(/[-:]/g, '').slice(0, 15);
   const slug = `auto-${stamp}-${destination.id}-${ideaIndex + 1}`.replace(/[^a-z0-9-]+/g, '-');
