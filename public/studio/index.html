@@ -586,7 +586,9 @@ function renderWeek() {
   $('#weekCount').hidden = !ready;
   $('#weekCount').textContent = ready;
   $('#weekStart').disabled = open > 0;
-  $('#weekApproveAll').hidden = !ready;
+  const incomplete = items.some((i) => i.status === 'scheduled' && i.platforms && Object.values(i.platforms).some((v) => v === 'pending' || v === 'error'));
+  $('#weekApproveAll').hidden = !ready && !incomplete;
+  $('#weekApproveAll').textContent = ready ? 'Aprobar todo lo listo' : 'Completar Facebook y TikTok';
   $('#weekCancel').hidden = !items.some((i) => i.status === 'queued');
   $('#weekHelp').innerHTML = open
     ? `Generando: quedan ${open} de ${items.filter((i) => i.date >= week.startDate).length} videos (unos 20 min cada uno). Deja el PC encendido; si se apaga, sigue al volver.`
@@ -605,7 +607,10 @@ function renderWeek() {
       if (i.status === 'ready') actions = `<button class="btn" data-goto-video="${esc(i.contentId)}">Revisar</button><button class="btn ok" data-week-approve="${esc(i.contentId)}">Aprobar</button>`;
       if (i.status === 'failed' || i.status === 'rejected') actions = `<button class="btn" data-week-retry="${esc(i.id)}">Volver a generar</button>`;
       if (i.youtubeUrl) actions += `<a class="btn" href="${esc(i.youtubeUrl)}" target="_blank" rel="noopener">YouTube</a>`;
-      return `<div class="witem"><div class="txt"><span class="chip">${esc(labels[i.destinationId] || i.destinationId)}</span> <span class="chip ${cls}">${esc(text)}</span><div>${esc(i.title || i.idea || 'Idea pendiente')}</div>${i.error ? `<div class="small" style="color:var(--bad)">${esc(i.error)}</div>` : ''}</div><div class="row">${actions}</div></div>`;
+      const pl = i.platforms ? Object.entries({ youtube: 'YouTube', facebook: 'Facebook', tiktok: 'TikTok' })
+        .filter(([k]) => i.platforms[k] !== 'off')
+        .map(([k, name]) => `<span class="chip ${i.platforms[k] === 'ok' ? 'ok' : i.platforms[k] === 'error' ? 'bad' : ''}" title="${i.platforms[k] === 'ok' ? 'Programado / enviado' : i.platforms[k] === 'error' ? 'Falló' : 'Pendiente'}">${i.platforms[k] === 'ok' ? '✓' : i.platforms[k] === 'error' ? '✗' : '…'} ${name}</span>`).join(' ') : '';
+      return `<div class="witem"><div class="txt"><span class="chip">${esc(labels[i.destinationId] || i.destinationId)}</span> <span class="chip ${cls}">${esc(text)}</span> ${pl}<div>${esc(i.title || i.idea || 'Idea pendiente')}</div>${i.error ? `<div class="small" style="color:var(--bad)">${esc(i.error)}</div>` : ''}</div><div class="row">${actions}</div></div>`;
     }).join('')}</div>
   </div>`).join('');
 }

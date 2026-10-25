@@ -2440,7 +2440,7 @@ ${buildKaraokeEvents(timedWords).join('\n')}
   return result;
 }
 
-async function publishFacebookReel({ pageId, videoUrl, description }) {
+async function publishFacebookReel({ pageId, videoUrl, description, scheduledPublishTime = null }) {
   if (!facebookPublishingEnabled) {
     return { skipped: true, reason: 'Facebook deshabilitado temporalmente.' };
   }
@@ -2452,7 +2452,7 @@ async function publishFacebookReel({ pageId, videoUrl, description }) {
         'content-type': 'application/json',
         'x-internal-token': internalToken,
       },
-      body: JSON.stringify({ pageId, videoUrl: String(videoUrl || '').replace(appBaseUrl, facebookVideoBaseUrl), description }),
+      body: JSON.stringify({ pageId, videoUrl: String(videoUrl || '').replace(appBaseUrl, facebookVideoBaseUrl), description, scheduledPublishTime }),
       signal: AbortSignal.timeout(10 * 60 * 1000),
     });
     const payload = await response.json().catch(() => ({}));
@@ -2660,11 +2660,14 @@ async function publishGeneratedVideo(command, options = {}) {
   }
 
   const facebookPage = facebookPageFor(video.destinationId);
-  const facebook = await publishFacebookReel({
-    pageId: facebookPage?.pageId,
-    videoUrl: video.video_url,
-    description: video.description,
-  });
+  // Semana programada: el Reel ya quedo programado en Meta al aprobarlo.
+  const facebook = video.scheduled_facebook?.ok
+    ? video.scheduled_facebook
+    : await publishFacebookReel({
+      pageId: facebookPage?.pageId,
+      videoUrl: video.video_url,
+      description: video.description,
+    });
 
   let youtube = { skipped: true, reason: 'YouTube solo se publica automaticamente para destino religioso.' };
   // Semana programada: el video ya se subio a YouTube con fecha de estreno al aprobarlo.
@@ -2716,7 +2719,7 @@ async function publishGeneratedVideo(command, options = {}) {
     };
   }
 
-  const tiktok = await sendGeneratedVideoToTikTok(video);
+  const tiktok = video.scheduled_tiktok?.ok ? video.scheduled_tiktok : await sendGeneratedVideoToTikTok(video);
   const published = {
     mode: 'published',
     fileName: video.fileName,
@@ -4487,7 +4490,34 @@ async function approveWeekItem(contentId, options = {}) {
       scheduledYoutube = { ok: false, error: error.message, reconnect_url: error.reconnect_url || null };
     }
   }
-  writeJson(selected.metadataPath, { ...metadata, scheduled_youtube: scheduledYoutube, scheduled_publish_at: item.publishAt, publish_options: overrides });
+  // Facebook: el Reel se sube ya y Meta lo publica a su hora (no depende de que este PC este encendido).
+  let scheduledFacebook = metadata.scheduled_facebook || null;
+  const facebookPage = facebookPageFor(metadata.destinationId);
+  if (!scheduledFacebook?.ok && facebookPublishingEnabled && facebookPage && Date.parse(item.publishAt) - Date.now() > 20 * 60_000) {
+    scheduledFacebook = await publishFacebookReel({
+      pageId: facebookPage.pageId,
+      videoUrl: metadata.video_url,
+      description: metadata.description,
+      scheduledPublishTime: Math.floor(Date.parse(item.publishAt) / 1000),
+    });
+    if (scheduledFacebook.ok) scheduledFacebook = { ...scheduledFacebook, scheduled_for: item.publishAt };
+  }
+  // TikTok no permite programar por API: se manda ya a la bandeja y el aviso dice que dia toca.
+  let scheduledTiktok = metadata.scheduled_tiktok || null;
+  if (!scheduledTiktok?.ok && metadata.destinationId === 'religioso') {
+    scheduledTiktok = await sendGeneratedVideoToTikTokInbox(metadata);
+    const day = new Date(item.publishAt).toLocaleDateString('es', { weekday: 'long', day: 'numeric', month: 'long', timeZone: 'America/Santo_Domingo' });
+    await notifyTelegram(`🗓 <b>Para publicar el ${escapeHtml(day)}</b>
+${tiktokTelegramMessage(metadata, scheduledTiktok)}`);
+  }
+  writeJson(selected.metadataPath, {
+    ...metadata,
+    scheduled_youtube: scheduledYoutube,
+    scheduled_facebook: scheduledFacebook,
+    scheduled_tiktok: scheduledTiktok,
+    scheduled_publish_at: item.publishAt,
+    publish_options: overrides,
+  });
   upsertContentItem({
     ...(findContentItem(contentId) || {}),
     contentId,
@@ -4502,7 +4532,12 @@ async function approveWeekItem(contentId, options = {}) {
     ok: true,
     publishAt: item.publishAt,
     youtube: scheduledYoutube,
-    warning: scheduledYoutube && !scheduledYoutube.ok ? `YouTube no quedo programado (${scheduledYoutube.error}); se intentara subir a la hora de publicar.` : null,
+    facebook: scheduledFacebook,
+    tiktok: scheduledTiktok,
+    warning: [
+      scheduledYoutube && !scheduledYoutube.ok ? `YouTube no quedo programado (${scheduledYoutube.error})` : '',
+      scheduledFacebook && scheduledFacebook.ok === false ? `Facebook no quedo programado (${scheduledFacebook.error})` : '',
+    ].filter(Boolean).join('; ') ? 'Algo no quedo programado; se intentara a la hora de publicar. Revisa la pestana Semana.' : null,
   };
 }
 
@@ -4510,7 +4545,10 @@ async function approveAllWeekItems() {
   const plan = readWeekPlan();
   const results = [];
   for (const item of plan?.items || []) {
-    if (weekItemStatus(item) !== 'ready') continue;
+    const status = weekItemStatus(item);
+    const metadata = status === 'scheduled' ? generatedVideoForContentId(item.contentId)?.metadata : null;
+    const incomplete = metadata && (!metadata.scheduled_facebook?.ok && facebookPageFor(metadata.destinationId) || (metadata.destinationId === 'religioso' && !metadata.scheduled_tiktok?.ok));
+    if (status !== 'ready' && !incomplete) continue;
     try {
       results.push({ id: item.id, ...(await approveWeekItem(item.contentId)) });
     } catch (error) {
@@ -4576,6 +4614,16 @@ function weekPlanView() {
         title: content?.title || null,
         publishAt: item.publishAt,
         error: item.error || null,
+        platforms: (() => {
+          const metadata = item.contentId ? generatedVideoForContentId(item.contentId)?.metadata : null;
+          if (!metadata) return null;
+          const state = (result) => (result?.ok ? 'ok' : result ? 'error' : 'pending');
+          return {
+            youtube: state(content?.publish_result?.youtube || metadata.scheduled_youtube),
+            facebook: facebookPageFor(item.destinationId) ? state(content?.publish_result?.facebook || metadata.scheduled_facebook) : 'off',
+            tiktok: item.destinationId === 'religioso' ? state(content?.publish_result?.tiktok || metadata.scheduled_tiktok) : 'off',
+          };
+        })(),
         youtubeUrl: content?.publish_result?.youtube?.url || generatedVideoForContentId(item.contentId)?.metadata?.scheduled_youtube?.url || null,
       };
     });
