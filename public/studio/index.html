@@ -103,6 +103,14 @@ summary { cursor: pointer; color: var(--muted); font-size: 13px; }
 .alert.warn { background: color-mix(in srgb, var(--warn) 12%, var(--panel)); border-color: color-mix(in srgb, var(--warn) 35%, var(--line)); }
 .alert.ok { background: color-mix(in srgb, var(--ok) 12%, var(--panel)); border-color: color-mix(in srgb, var(--ok) 35%, var(--line)); }
 .channels { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 320px), 1fr)); gap: 16px; }
+.week { display: grid; gap: 10px; }
+.wday { display: grid; grid-template-columns: 120px minmax(0, 1fr); gap: 12px; padding: 12px 0; border-top: 1px solid var(--line); }
+.wday:first-child { border-top: 0; }
+.wday .d { font-weight: 600; }
+.wday .d small { display: block; font-weight: 400; color: var(--muted); }
+.witem { display: flex; gap: 10px; align-items: center; justify-content: space-between; flex-wrap: wrap; padding: 6px 0; }
+.witem .txt { min-width: 0; flex: 1 1 260px; }
+@media (max-width: 600px) { .wday { grid-template-columns: minmax(0, 1fr); gap: 4px; } }
 .channel h3 { margin: 0 0 4px; font-size: 16px; display: flex; align-items: center; gap: 8px; }
 ol.steps { margin: 8px 0 0; padding-left: 20px; }
 ol.steps li { margin-bottom: 4px; }
@@ -129,6 +137,7 @@ ol.steps li { margin-bottom: 4px; }
     </div>
     <nav id="tabs">
       <button data-tab="generar" class="on">Generar</button>
+      <button data-tab="semana">Semana <span class="count" id="weekCount" hidden></span></button>
       <button data-tab="aprobar">Por aprobar <span class="count" id="pendingCount" hidden></span></button>
       <button data-tab="historial">Historial</button>
       <button data-tab="pruebas">Pruebas</button>
@@ -160,6 +169,14 @@ ol.steps li { margin-bottom: 4px; }
       </div>
     </section>
 
+    <section id="semana">
+      <div class="card" style="margin-bottom:16px">
+        <h2>Semana programada</h2>
+        <p class="small muted" id="weekHelp"></p>
+        <div class="row"><button class="btn primary" id="weekStart">Generar la semana</button><button class="btn ok" id="weekApproveAll" hidden>Aprobar todo lo listo</button><button class="btn bad" id="weekCancel" hidden>Cancelar lo que falta</button></div>
+      </div>
+      <div class="card"><div class="week" id="weekList"></div></div>
+    </section>
     <section id="aprobar"><div class="videos" id="pendingList"></div></section>
     <section id="historial"><div class="videos" id="historyList"></div></section>
     <section id="pruebas"><div class="videos" id="testList"></div></section>
@@ -190,6 +207,9 @@ ol.steps li { margin-bottom: 4px; }
           <label class="row" style="margin-bottom:8px"><input type="checkbox" id="cinematicLook"> <span>Look cine: grano, color de película y leve cámara en mano</span></label>
           <label class="row" style="margin-bottom:8px"><input type="checkbox" id="realClips"> <span>Clips reales (solo Vida con Dios): tomas de apoyo de Pixabay (manos, Biblia, luz, lugares) entre las imágenes IA</span></label>
           <p class="small muted" style="margin-bottom:16px">Si no hay un clip que encaje, se usa la imagen IA como siempre. Prueba primero con “Generar prueba”.</p>
+          <h2 style="margin-top:20px">Facebook (Reels)</h2>
+          <label class="field"><span>Página para Vida con Dios</span><select id="fbReligioso"><option value="">No publicar en Facebook</option></select></label>
+          <label class="field"><span>Página para Películas</span><select id="fbPeliculas"><option value="">No publicar en Facebook</option></select></label>
           <button class="btn primary" id="saveSettings">Guardar ajustes</button>
         </div>
         <div class="card">
@@ -215,7 +235,7 @@ const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const labels = { religioso: 'Vida con Dios', fanspeliculas: 'Películas' };
-const statusLabels = { publish_failed: ['Falló la publicación', 'bad'], preview_ready: ['Por aprobar', 'warn'], published: ['Publicado', 'ok'], rejected: ['Rechazado', 'bad'], approved: ['Aprobado', 'ok'], test: ['Prueba', ''] };
+const statusLabels = { scheduled: ['Programado', 'ok'], publish_failed: ['Falló la publicación', 'bad'], preview_ready: ['Por aprobar', 'warn'], published: ['Publicado', 'ok'], rejected: ['Rechazado', 'bad'], approved: ['Aprobado', 'ok'], test: ['Prueba', ''] };
 let state = null;
 let tiktokConnected = false;
 let ui = { dest: 'religioso', idea: 0, mode: 'preview', settingsLoaded: false };
@@ -285,7 +305,7 @@ function selectTab(tab) {
   $$('#tabs button').forEach((b) => b.classList.toggle('on', b.dataset.tab === tab));
   $$('main section').forEach((s) => s.classList.toggle('on', s.id === tab));
   storage('cc-tab', tab);
-  if (tab === 'canales') loadChannels();
+  if (tab === 'canales' || tab === 'ajustes') loadChannels();
 }
 $('#tabs').addEventListener('click', (event) => {
   const button = event.target.closest('button[data-tab]');
@@ -443,7 +463,8 @@ function publishForm(v) {
     <label><span>Descripción</span><textarea name="description" rows="4">${esc(v.description || '')}</textarea></label>
     <label><span>Etiquetas (separadas por coma)</span><input name="tags" value="${esc((v.tags || []).join(', '))}"></label>
     <label><span>Visibilidad en YouTube</span><select name="privacyStatus">${Object.entries(privacyLabels).map(([k, l]) => `<option value="${k}">${l}</option>`).join('')}</select></label>
-    <div class="row"><button class="btn ok" type="submit">${v.status === 'publish_failed' ? 'Reintentar publicación' : 'Publicar'}</button><button class="btn bad" type="button" data-reject="${esc(v.contentId)}">Rechazar</button></div>
+    ${v.scheduledFor && v.status === 'preview_ready' ? `<div class="row"><button class="btn ok" type="submit" value="schedule">Programar · ${esc(whenText(v.scheduledFor))}</button><button class="btn" type="submit" value="now">Publicar ahora</button><button class="btn bad" type="button" data-reject="${esc(v.contentId)}">Rechazar</button></div>`
+      : `<div class="row"><button class="btn ok" type="submit">${v.status === 'publish_failed' ? 'Reintentar publicación' : 'Publicar'}</button><button class="btn bad" type="button" data-reject="${esc(v.contentId)}">Rechazar</button></div>`}
   </form>`;
 }
 
@@ -459,8 +480,24 @@ document.addEventListener('submit', async (event) => {
   event.preventDefault();
   const data = new FormData(form);
   const privacy = data.get('privacyStatus');
+  if (event.submitter?.value === 'schedule') {
+    event.submitter.disabled = true;
+    event.submitter.textContent = 'Programando…';
+    try {
+      const result = await api('week-approve', {
+        contentId: form.dataset.publish,
+        title: data.get('title'),
+        description: data.get('description'),
+        tags: String(data.get('tags') || '').split(',').map((t) => t.trim()).filter(Boolean),
+      });
+      toast(result.warning || `Programado: sale ${whenText(result.publishAt)}.`, 7000);
+      selectTab('semana');
+    } catch (error) { toast(error.message, 8000); }
+    $('#pendingList').dataset.key = '';
+    return refresh();
+  }
   if (!confirm(`¿Publicar ahora como "${privacyLabels[privacy]}"?`)) return;
-  const button = $('button[type=submit]', form);
+  const button = event.submitter || $('button[type=submit]', form);
   button.disabled = true;
   button.textContent = 'Subiendo…';
   try {
@@ -489,6 +526,14 @@ async function loadChannels() {
   try {
     const { channels } = await api('channels');
     tiktokConnected = channels.tiktok.status === 'ok';
+    const fb = channels.facebook;
+    for (const [id, dest] of [['fbReligioso', 'religioso'], ['fbPeliculas', 'fanspeliculas']]) {
+      const select = $(`#${id}`);
+      if (select.dataset.loaded) continue;
+      select.dataset.loaded = '1';
+      select.innerHTML = '<option value="">No publicar en Facebook</option>' + (fb.pages || []).map((p) => `<option value="${esc(p.pageId)}">${esc(p.name)}</option>`).join('');
+      select.value = fb.assigned?.[dest] || '';
+    }
     const expired = channels.youtube.filter((c) => c.status !== 'ok');
     $('#channelAlert').hidden = !expired.length;
     const testing = channels.youtube.some((c) => c.testingMode);
@@ -526,6 +571,91 @@ async function loadChannels() {
   }
 }
 $('#checkChannels').addEventListener('click', loadChannels);
+
+const dayFormat = new Intl.DateTimeFormat('es', { weekday: 'long', day: 'numeric', month: 'short', timeZone: 'UTC' });
+function whenText(iso) {
+  return new Date(iso).toLocaleString('es', { weekday: 'short', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' });
+}
+const weekStatus = { queued: ['En cola', ''], generating: ['Generando…', 'warn'], ready: ['Listo para aprobar', 'warn'], scheduled: ['Programado', 'ok'], published: ['Publicado', 'ok'], failed: ['Falló', 'bad'], rejected: ['Rechazado', 'bad'], publish_failed: ['Falló la publicación', 'bad'] };
+
+function renderWeek() {
+  const week = state.week || { items: [] };
+  const items = week.items;
+  const open = items.filter((i) => ['queued', 'generating'].includes(i.status)).length;
+  const ready = items.filter((i) => i.status === 'ready').length;
+  $('#weekCount').hidden = !ready;
+  $('#weekCount').textContent = ready;
+  $('#weekStart').disabled = open > 0;
+  $('#weekApproveAll').hidden = !ready;
+  $('#weekCancel').hidden = !items.some((i) => i.status === 'queued');
+  $('#weekHelp').innerHTML = open
+    ? `Generando: quedan ${open} de ${items.filter((i) => i.date >= week.startDate).length} videos (unos 20 min cada uno). Deja el PC encendido; si se apaga, sigue al volver.`
+    : `Genera 7 días seguidos de videos (1 de Vida con Dios + 1 de Películas por día, unas 5 horas). Los apruebas aquí y cada uno sale solo a las <b>${esc(week.publishTime || '7:00')}</b> de su día en YouTube, Facebook y la bandeja de TikTok. YouTube queda programado al aprobar, así que sale a su hora aunque el PC esté apagado; Facebook y TikTok salen cuando el PC esté encendido.`;
+  const key = JSON.stringify(items);
+  const list = $('#weekList');
+  if (list.dataset.key === key) return;
+  list.dataset.key = key;
+  if (!items.length) { list.innerHTML = '<div class="empty">Todavía no hay una semana programada.</div>'; return; }
+  const dates = [...new Set(items.map((i) => i.date))].sort();
+  list.innerHTML = dates.map((date) => `<div class="wday">
+    <div class="d">${esc(dayFormat.format(new Date(`${date}T12:00:00Z`)))}<small>${date === week.today ? 'hoy · ' : ''}${esc(week.publishTime)}</small></div>
+    <div>${items.filter((i) => i.date === date).map((i) => {
+      const [text, cls] = weekStatus[i.status] || [i.status, ''];
+      let actions = '';
+      if (i.status === 'ready') actions = `<button class="btn" data-goto-video="${esc(i.contentId)}">Revisar</button><button class="btn ok" data-week-approve="${esc(i.contentId)}">Aprobar</button>`;
+      if (i.status === 'failed' || i.status === 'rejected') actions = `<button class="btn" data-week-retry="${esc(i.id)}">Volver a generar</button>`;
+      if (i.youtubeUrl) actions += `<a class="btn" href="${esc(i.youtubeUrl)}" target="_blank" rel="noopener">YouTube</a>`;
+      return `<div class="witem"><div class="txt"><span class="chip">${esc(labels[i.destinationId] || i.destinationId)}</span> <span class="chip ${cls}">${esc(text)}</span><div>${esc(i.title || i.idea || 'Idea pendiente')}</div>${i.error ? `<div class="small" style="color:var(--bad)">${esc(i.error)}</div>` : ''}</div><div class="row">${actions}</div></div>`;
+    }).join('')}</div>
+  </div>`).join('');
+}
+
+$('#weekStart').addEventListener('click', async () => {
+  if (!confirm('¿Generar los videos de 7 días? Son unos 14 videos y tardan unas 5 horas en total.')) return;
+  try {
+    const result = await api('week-start', {});
+    toast(`Semana del ${result.startDate} al ${result.endDate}: ${result.videos} videos en cola.`, 6000);
+  } catch (error) { toast(error.message, 6000); }
+  refresh();
+});
+$('#weekCancel').addEventListener('click', async () => {
+  if (!confirm('¿Quitar de la cola los videos que todavía no empezaron?')) return;
+  try { const r = await api('week-cancel', {}); toast(`${r.removed} quitados de la cola.`); } catch (error) { toast(error.message, 6000); }
+  refresh();
+});
+$('#weekApproveAll').addEventListener('click', async () => {
+  if (!confirm('¿Aprobar todos los videos listos? Cada uno saldrá a su hora.')) return;
+  const button = $('#weekApproveAll');
+  button.disabled = true;
+  button.textContent = 'Programando…';
+  try { const r = await api('week-approve-all', {}); toast(`${r.approved} programados.${r.ok ? '' : ' Algunos fallaron: revisa la lista.'}`, 7000); } catch (error) { toast(error.message, 8000); }
+  button.disabled = false;
+  button.textContent = 'Aprobar todo lo listo';
+  refresh();
+});
+$('#weekList').addEventListener('click', async (event) => {
+  const go = event.target.closest('[data-goto-video]');
+  if (go) {
+    selectTab('aprobar');
+    const card = $(`form[data-publish="${CSS.escape(go.dataset.gotoVideo)}"]`)?.closest('article');
+    card?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    return;
+  }
+  const approve = event.target.closest('[data-week-approve]');
+  const retry = event.target.closest('[data-week-retry]');
+  try {
+    if (approve) {
+      approve.disabled = true;
+      approve.textContent = 'Programando…';
+      const r = await api('week-approve', { contentId: approve.dataset.weekApprove });
+      toast(r.warning || `Programado: sale ${whenText(r.publishAt)}.`, 7000);
+    } else if (retry) {
+      await api('week-retry', { id: retry.dataset.weekRetry });
+      toast('Vuelve a la cola.');
+    } else return;
+  } catch (error) { toast(error.message, 8000); }
+  refresh();
+});
 
 function renderList(el, list, emptyText) {
   const key = list.map((v) => `${v.contentId || v.fileName}:${v.status}:${v.publishError || ''}`).join('|');
@@ -634,6 +764,7 @@ $('#saveSettings').addEventListener('click', async () => {
       voiceNatural: $('#voiceNatural').checked,
       cinematicLook: $('#cinematicLook').checked,
       realClips: $('#realClips').checked,
+      ...($('#fbReligioso').dataset.loaded ? { facebookPages: { religioso: $('#fbReligioso').value, fanspeliculas: $('#fbPeliculas').value } } : {}),
     });
     state.settings = result.settings;
     toast('Ajustes guardados. Se aplican al próximo video.');
@@ -687,13 +818,14 @@ async function refresh() {
     renderJob();
     if (!$('#destSeg').children.length) renderGenerator();
     renderVideos();
+    renderWeek();
     renderSystem();
     renderSettings();
   } catch (error) {
     if (!$('#login').hidden) return;
     toast(error.message);
   }
-  timer = setTimeout(refresh, state?.busy ? 4000 : 20000);
+  timer = setTimeout(refresh, state?.busy || state?.week?.running ? 4000 : 20000);
 }
 
 function start() {

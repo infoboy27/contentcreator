@@ -20,7 +20,13 @@ const maximumNarrationSeconds = 95;
 const minimumVideoSeconds = 61;
 const minimumScriptWords = 165;
 const maximumScriptWords = 210;
-const facebookRewardsBaseUrl = (process.env.FACEBOOKREWARDS_BASE_URL || 'https://facebookrewards.jfmcss.com').replace(/\/+$/, '');
+// Por la red interna de Docker: la URL publica pasa por Cloudflare, que bloquea las llamadas de servidor (403).
+const facebookRewardsBaseUrl = (process.env.FACEBOOKREWARDS_BASE_URL || 'http://facebookrewards-app-1:3000').replace(/\/+$/, '');
+// facebookrewards descarga el MP4 desde aqui antes de subirlo a Meta.
+const facebookVideoBaseUrl = (process.env.FACEBOOK_VIDEO_BASE_URL || 'http://contentcreator-site:3000').replace(/\/+$/, '');
+// Semana programada: cada video sale a esta hora local del dia que le toca (Republica Dominicana, UTC-4 todo el ano).
+const weekPublishTime = /^\d{2}:\d{2}$/.test(process.env.WEEK_PUBLISH_TIME || '') ? process.env.WEEK_PUBLISH_TIME : '07:00';
+const localUtcOffset = /^[+-]\d{2}:\d{2}$/.test(process.env.LOCAL_UTC_OFFSET || '') ? process.env.LOCAL_UTC_OFFSET : '-04:00';
 const facebookPublishingEnabled = !['0', 'false', 'off', 'disabled'].includes(
   String(process.env.FACEBOOK_PUBLISHING_ENABLED || 'true').trim().toLowerCase(),
 );
@@ -791,7 +797,7 @@ function requireYouTubeUploadScope(token) {
   }
 }
 
-async function uploadYouTubeVideo({ fileName, title, description, privacyStatus = 'private', tags = [], channelKey = defaultYouTubeChannelKey }) {
+async function uploadYouTubeVideo({ fileName, title, description, privacyStatus = 'private', tags = [], channelKey = defaultYouTubeChannelKey, publishAt = null }) {
   const key = resolveYouTubeChannelKey(channelKey);
   const tokenPathForUpload = youtubeTokenPathForChannel(key);
   const token = await refreshAccessToken(readJson(tokenPathForUpload), tokenPathForUpload);
@@ -822,7 +828,9 @@ async function uploadYouTubeVideo({ fileName, title, description, privacyStatus 
       tags,
     },
     status: {
-      privacyStatus,
+      // Con publishAt YouTube exige "private" y lo hace publico solo a esa hora, aunque este PC este apagado.
+      privacyStatus: publishAt ? 'private' : privacyStatus,
+      ...(publishAt ? { publishAt } : {}),
       selfDeclaredMadeForKids: false,
     },
   };
@@ -869,7 +877,8 @@ async function uploadYouTubeVideo({ fileName, title, description, privacyStatus 
     platform: 'youtube',
     video_id: payload.id,
     url: payload.id ? `https://www.youtube.com/watch?v=${payload.id}` : null,
-    privacyStatus,
+    privacyStatus: publishAt ? 'public' : privacyStatus,
+    publishAt,
     title: metadata.snippet.title,
     fileName: safeName,
     channelKey: key,
@@ -1132,6 +1141,8 @@ const studioSettingsDefaults = {
   // Realismo (apagados por defecto): look de pelicula y clips reales de Pixabay como tomas de apoyo.
   cinematicLook: false,
   realClips: false,
+  // Pagina de Facebook donde sale cada canal ("" = ninguna; sin valor = la de facebookDestinations).
+  facebookPages: {},
 };
 let studioSettingsCache = null;
 
@@ -1146,6 +1157,7 @@ function studioSettings() {
           ...studioSettingsDefaults,
           ...saved,
           voiceSpeed: { ...studioSettingsDefaults.voiceSpeed, ...(saved.voiceSpeed || {}) },
+          facebookPages: { ...studioSettingsDefaults.facebookPages, ...(saved.facebookPages || {}) },
         },
       };
     }
@@ -2432,19 +2444,48 @@ async function publishFacebookReel({ pageId, videoUrl, description }) {
   if (!facebookPublishingEnabled) {
     return { skipped: true, reason: 'Facebook deshabilitado temporalmente.' };
   }
-  const response = await fetch(`${facebookRewardsBaseUrl}/internal/contentcreator/facebook-reel`, {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      'x-internal-token': internalToken,
-    },
-    body: JSON.stringify({ pageId, videoUrl, description }),
-  });
-  const payload = await response.json();
-  if (!response.ok) {
-    return { ok: false, error: payload.error || `Facebook Reel failed: ${response.status}` };
+  if (!pageId) return { skipped: true, reason: 'Este canal no tiene pagina de Facebook elegida (Studio > Ajustes).' };
+  try {
+    const response = await fetch(`${facebookRewardsBaseUrl}/internal/contentcreator/facebook-reel`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-internal-token': internalToken,
+      },
+      body: JSON.stringify({ pageId, videoUrl: String(videoUrl || '').replace(appBaseUrl, facebookVideoBaseUrl), description }),
+      signal: AbortSignal.timeout(10 * 60 * 1000),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok || payload.ok === false) {
+      return { ok: false, error: payload.error || `Facebook Reel failed: ${response.status}` };
+    }
+    return payload;
+  } catch (error) {
+    return { ok: false, error: `Facebook no respondio: ${error.message}` };
   }
-  return payload;
+}
+
+// Pagina de Facebook de cada canal: la elegida en Studio > Ajustes; si no, la de facebookDestinations.
+function facebookPageFor(destinationId) {
+  const chosen = studioSettings().facebookPages?.[destinationId];
+  if (chosen === '') return null;
+  const pageId = chosen || facebookDestinations[destinationId]?.pageId || null;
+  if (!pageId) return null;
+  const known = Object.values(facebookDestinations).find((item) => item.pageId === pageId);
+  return { pageId, pageName: known?.pageName || pageId };
+}
+
+async function facebookConnectedPages() {
+  try {
+    const response = await fetch(`${facebookRewardsBaseUrl}/internal/contentcreator/facebook-pages`, {
+      headers: { 'x-internal-token': internalToken },
+      signal: AbortSignal.timeout(10_000),
+    });
+    const payload = await response.json();
+    return (payload.pages || []).map((page) => ({ pageId: page.pageId, name: page.name }));
+  } catch {
+    return [];
+  }
 }
 
 async function produceAndPublishVideo(command, { publish = false, source = 'telegram', customIdea = null } = {}) {
@@ -2479,14 +2520,12 @@ async function produceAndPublishVideo(command, { publish = false, source = 'tele
   const shouldSendTelegramVideo = !video.telegram_sent_at && !isRejectedVideoCandidate({ metadata: video });
   let facebook = { skipped: true, reason: 'Facebook deshabilitado temporalmente.' };
   let youtube = { skipped: true, reason: 'Preview generado; YouTube no se publica hasta confirmar calidad del video.' };
-  if (publish && video.facebookPageId) {
+  if (publish) {
     facebook = await publishFacebookReel({
-      pageId: video.facebookPageId,
+      pageId: facebookPageFor(video.destinationId)?.pageId,
       videoUrl: video.video_url,
       description: video.description,
     });
-  } else if (publish) {
-    facebook = { skipped: true, reason: 'Este destino no tiene pagina Facebook configurada.' };
   }
   if (publish && video.shouldPublishYouTube) {
     try {
@@ -2620,16 +2659,18 @@ async function publishGeneratedVideo(command, options = {}) {
     };
   }
 
-  const facebook = facebookPublishingEnabled && video.facebookPageId
-    ? await publishFacebookReel({
-      pageId: video.facebookPageId,
-      videoUrl: video.video_url,
-      description: video.description,
-    })
-    : { skipped: true, reason: facebookPublishingEnabled ? 'Este destino no tiene pagina Facebook configurada.' : 'Facebook deshabilitado temporalmente.' };
+  const facebookPage = facebookPageFor(video.destinationId);
+  const facebook = await publishFacebookReel({
+    pageId: facebookPage?.pageId,
+    videoUrl: video.video_url,
+    description: video.description,
+  });
 
   let youtube = { skipped: true, reason: 'YouTube solo se publica automaticamente para destino religioso.' };
-  if (video.shouldPublishYouTube) {
+  // Semana programada: el video ya se subio a YouTube con fecha de estreno al aprobarlo.
+  if (video.scheduled_youtube?.ok) {
+    youtube = video.scheduled_youtube;
+  } else if (video.shouldPublishYouTube) {
     try {
       youtube = await uploadYouTubeVideo({
         fileName: video.fileName,
@@ -4241,6 +4282,315 @@ function studioSystemStatus() {
   return system;
 }
 
+// ---------- Semana programada: se generan 7 dias de videos de una vez y cada uno sale a su hora ----------
+const weekPlanPath = path.join(dataDir, 'week-plan.json');
+const weekDestinations = ['religioso', 'fanspeliculas'];
+let weekWorkerRunning = false;
+let weekPublishRunning = false;
+
+function localDateKey(time = Date.now()) {
+  const [, sign, hours, minutes] = localUtcOffset.match(/([+-])(\d{2}):(\d{2})/);
+  const offsetMs = (sign === '-' ? -1 : 1) * (Number(hours) * 60 + Number(minutes)) * 60_000;
+  return new Date(time + offsetMs).toISOString().slice(0, 10);
+}
+
+function weekPublishAt(dateKey) {
+  return new Date(`${dateKey}T${weekPublishTime}:00${localUtcOffset}`).toISOString();
+}
+
+function readWeekPlan() {
+  return readJson(weekPlanPath, null);
+}
+
+function updateWeekItem(id, patch) {
+  const plan = readWeekPlan();
+  const item = plan?.items.find((candidate) => candidate.id === id);
+  if (!item) return null;
+  Object.assign(item, patch);
+  writeJson(weekPlanPath, plan);
+  return item;
+}
+
+function weekItemForContent(contentId) {
+  if (!contentId) return null;
+  return readWeekPlan()?.items.find((item) => item.contentId === contentId) || null;
+}
+
+function weekItemStatus(item) {
+  if (!item.contentId) return item.status;
+  const status = findContentItem(item.contentId)?.status;
+  if (status === 'published' || item.publishedAt) return 'published';
+  if (status === 'rejected') return 'rejected';
+  if (status === 'publish_failed') return 'publish_failed';
+  return item.approvedAt ? 'scheduled' : 'ready';
+}
+
+function startWeekPlan() {
+  const current = readWeekPlan();
+  if (current?.items.some((item) => ['queued', 'generating'].includes(item.status))) {
+    const error = new Error('Ya hay una semana generandose. Espera a que termine o cancelala.');
+    error.status = 409;
+    throw error;
+  }
+  const today = localDateKey();
+  // Se conservan los dias que aun no salen; la semana nueva empieza despues del ultimo.
+  const kept = (current?.items || []).filter((item) => item.date >= today && !['failed', 'rejected', 'published'].includes(weekItemStatus(item)));
+  const lastDate = kept.map((item) => item.date).sort().pop();
+  const first = Date.parse(`${lastDate && lastDate >= localDateKey(Date.now() + 86_400_000) ? lastDate : today}T12:00:00Z`) + 86_400_000;
+  const dates = Array.from({ length: 7 }, (_, index) => new Date(first + index * 86_400_000).toISOString().slice(0, 10));
+  const plan = {
+    createdAt: new Date().toISOString(),
+    startDate: dates[0],
+    endDate: dates[6],
+    items: [
+      ...kept,
+      ...dates.flatMap((date) => weekDestinations.map((destinationId) => ({
+        id: `${date}-${destinationId}`,
+        date,
+        destinationId,
+        idea: null,
+        status: 'queued',
+        contentId: null,
+        publishAt: weekPublishAt(date),
+      }))),
+    ],
+  };
+  writeJson(weekPlanPath, plan);
+  setTimeout(runWeekWorker, 1000);
+  return { ok: true, startDate: plan.startDate, endDate: plan.endDate, videos: dates.length * weekDestinations.length };
+}
+
+function cancelWeekPlan() {
+  const plan = readWeekPlan();
+  if (!plan) return { ok: true, removed: 0 };
+  const before = plan.items.length;
+  plan.items = plan.items.filter((item) => item.status !== 'queued');
+  writeJson(weekPlanPath, plan);
+  return { ok: true, removed: before - plan.items.length };
+}
+
+// Vuelve a poner en cola un dia que fallo o que rechazaste (con una idea nueva si lo rechazaste).
+function retryWeekItem(id) {
+  const plan = readWeekPlan();
+  const item = plan?.items.find((candidate) => candidate.id === id);
+  if (!item) throw new Error('Ese dia no esta en la semana.');
+  const status = weekItemStatus(item);
+  if (!['failed', 'rejected'].includes(status)) throw new Error('Solo se puede volver a generar un dia que fallo o que rechazaste.');
+  Object.assign(item, { status: 'queued', contentId: null, error: null, approvedAt: null, idea: status === 'rejected' ? null : item.idea });
+  writeJson(weekPlanPath, plan);
+  setTimeout(runWeekWorker, 1000);
+  return { ok: true };
+}
+
+async function weekIdeaFor(item) {
+  const used = new Set([
+    ...recentContentKeys(item.destinationId, 30),
+    ...readWeekPlan().items.filter((other) => other.idea && other.id !== item.id).map((other) => normalizeContentKey(other.idea)),
+  ]);
+  let ideas = readJson(aiIdeasPath, {})[item.date]?.[item.destinationId] || [];
+  if (!ideas.some((idea) => !used.has(normalizeContentKey(idea))) && ideasProvider === 'local') {
+    try {
+      ideas = await generateAiIdeas(item.destinationId, item.date);
+      const stored = readJson(aiIdeasPath, {});
+      stored[item.date] = { ...(stored[item.date] || {}), [item.destinationId]: ideas };
+      writeJson(aiIdeasPath, stored);
+    } catch (error) {
+      console.warn(`[semana] ideas ${item.date} ${item.destinationId}: ${error.message}`);
+    }
+  }
+  const idea = [...ideas, ...weeklyTopicBanks[item.destinationId]].find((candidate) => !used.has(normalizeContentKey(candidate)));
+  if (!idea) throw new Error('No quedan temas nuevos para este canal.');
+  return idea;
+}
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// La GPU llega a ~110 C con cada video: entre uno y otro se espera a que baje (como mucho 10 min).
+async function coolDownGpu() {
+  for (let waited = 0; waited < 10 * 60_000; waited += 30_000) {
+    const junction = studioSystemStatus().gpu?.junction;
+    if (!junction || junction < 85) return;
+    await sleep(30_000);
+  }
+}
+
+async function runWeekWorker() {
+  if (weekWorkerRunning) return;
+  weekWorkerRunning = true;
+  let ready = 0;
+  let failed = 0;
+  try {
+    for (;;) {
+      const item = readWeekPlan()?.items.find((candidate) => candidate.status === 'queued');
+      if (!item) break;
+      if (activeVideoJob || aiIdeasRunning) {
+        await sleep(60_000);
+        continue;
+      }
+      await coolDownGpu();
+      try {
+        const idea = item.idea || await weekIdeaFor(item);
+        updateWeekItem(item.id, { idea, status: 'generating', startedAt: new Date().toISOString(), error: null });
+        const command = `GENERAR VIDEO ${item.destinationId === 'religioso' ? 'RELIGIOSO' : 'PELICULAS'} 1`;
+        const result = await produceAndPublishVideo(command, { source: `Semana (${item.date})`, customIdea: idea });
+        updateWeekItem(item.id, { status: 'ready', contentId: result.contentId, finishedAt: new Date().toISOString() });
+        ready += 1;
+      } catch (error) {
+        if (error.code === 'VIDEO_JOB_BUSY') {
+          updateWeekItem(item.id, { status: 'queued' });
+          await sleep(60_000);
+          continue;
+        }
+        console.warn(`[semana] ${item.id}: ${error.message}`);
+        updateWeekItem(item.id, { status: 'failed', error: error.message, finishedAt: new Date().toISOString() });
+        failed += 1;
+      }
+    }
+  } finally {
+    weekWorkerRunning = false;
+  }
+  if (ready || failed) {
+    await notifyTelegram([
+      '<b>Semana generada</b>',
+      `${ready} videos listos para aprobar${failed ? `, ${failed} fallaron` : ''}.`,
+      `Apruebalos en ${appBaseUrl}/studio (pestana Semana). Cada uno sale a las ${weekPublishTime} de su dia.`,
+    ].join('\n'));
+  }
+}
+
+async function approveWeekItem(contentId, options = {}) {
+  const item = weekItemForContent(contentId);
+  if (!item) throw new Error('Ese video no es de la semana programada.');
+  const status = weekItemStatus(item);
+  if (status !== 'ready' && status !== 'scheduled') throw new Error('Ese video ya no esta pendiente de aprobar.');
+  const selected = generatedVideoForContentId(contentId);
+  if (!selected) throw new Error('No encuentro el MP4 de ese video.');
+  const overrides = cleanPublishOptions(options);
+  const metadata = {
+    ...selected.metadata,
+    ...('title' in overrides ? { title: overrides.title } : {}),
+    ...('description' in overrides ? { description: overrides.description } : {}),
+  };
+  let scheduledYoutube = metadata.scheduled_youtube || null;
+  // YouTube pide que la fecha de estreno sea futura; con menos margen se publica normal a la hora.
+  if (!scheduledYoutube?.ok && metadata.shouldPublishYouTube && Date.parse(item.publishAt) - Date.now() > 20 * 60_000) {
+    try {
+      scheduledYoutube = await uploadYouTubeVideo({
+        fileName: metadata.fileName,
+        title: metadata.title,
+        description: metadata.description,
+        tags: overrides.tags || youtubeTagsFor(metadata.destinationId),
+        channelKey: metadata.youtubeChannelKey || defaultYouTubeChannelKey,
+        publishAt: item.publishAt,
+      });
+    } catch (error) {
+      scheduledYoutube = { ok: false, error: error.message, reconnect_url: error.reconnect_url || null };
+    }
+  }
+  writeJson(selected.metadataPath, { ...metadata, scheduled_youtube: scheduledYoutube, scheduled_publish_at: item.publishAt, publish_options: overrides });
+  upsertContentItem({
+    ...(findContentItem(contentId) || {}),
+    contentId,
+    status: 'scheduled',
+    title: metadata.title,
+    description: metadata.description,
+    scheduled_publish_at: item.publishAt,
+  });
+  updateWeekItem(item.id, { approvedAt: new Date().toISOString() });
+  if (Date.parse(item.publishAt) <= Date.now()) await publishDueWeekItems();
+  return {
+    ok: true,
+    publishAt: item.publishAt,
+    youtube: scheduledYoutube,
+    warning: scheduledYoutube && !scheduledYoutube.ok ? `YouTube no quedo programado (${scheduledYoutube.error}); se intentara subir a la hora de publicar.` : null,
+  };
+}
+
+async function approveAllWeekItems() {
+  const plan = readWeekPlan();
+  const results = [];
+  for (const item of plan?.items || []) {
+    if (weekItemStatus(item) !== 'ready') continue;
+    try {
+      results.push({ id: item.id, ...(await approveWeekItem(item.contentId)) });
+    } catch (error) {
+      results.push({ id: item.id, ok: false, error: error.message });
+    }
+  }
+  return { ok: results.every((result) => result.ok), approved: results.filter((result) => result.ok).length, results };
+}
+
+// Cada minuto: publica lo aprobado cuya hora ya llego (si el PC estuvo apagado, en cuanto vuelve).
+async function publishDueWeekItems() {
+  if (weekPublishRunning) return;
+  weekPublishRunning = true;
+  try {
+    for (const item of readWeekPlan()?.items || []) {
+      if (!item.approvedAt || !item.contentId || item.publishedAt || Date.parse(item.publishAt) > Date.now()) continue;
+      const status = findContentItem(item.contentId)?.status;
+      if (status === 'published' || status === 'rejected') {
+        updateWeekItem(item.id, { publishedAt: status === 'published' ? new Date().toISOString() : null, approvedAt: status === 'rejected' ? null : item.approvedAt });
+        continue;
+      }
+      if (item.lastAttemptAt && Date.now() - Date.parse(item.lastAttemptAt) < 30 * 60_000) continue;
+      updateWeekItem(item.id, { lastAttemptAt: new Date().toISOString() });
+      const options = generatedVideoForContentId(item.contentId)?.metadata?.publish_options || {};
+      let result;
+      try {
+        result = await publishGeneratedVideo(`APROBAR ${item.contentId}`, { privacyStatus: 'public', ...options });
+      } catch (error) {
+        result = { ok: false, error: error.message };
+      }
+      if (result.ok) {
+        updateWeekItem(item.id, { publishedAt: new Date().toISOString(), error: null });
+        const facebook = result.facebook?.ok ? `Facebook: ${result.facebook.page?.name || 'publicado'}` : `Facebook: ${escapeHtml(result.facebook?.error || result.facebook?.reason || 'no')}`;
+        await notifyTelegram([
+          `<b>Publicado (${item.date})</b> ${escapeHtml(result.video?.title || '')}`,
+          result.youtube?.url ? `YouTube: ${result.youtube.url}` : `YouTube: ${escapeHtml(result.youtube?.error || result.youtube?.reason || 'no')}`,
+          facebook,
+        ].join('\n'));
+      } else {
+        updateWeekItem(item.id, { error: result.error });
+        await notifyTelegram(`<b>No se pudo publicar el video del ${item.date}</b>\n${escapeHtml(result.error || '')}\nSe reintenta en 30 min; revisalo en ${appBaseUrl}/studio`);
+      }
+    }
+  } finally {
+    weekPublishRunning = false;
+  }
+}
+
+function weekPlanView() {
+  const plan = readWeekPlan();
+  const today = localDateKey();
+  const items = (plan?.items || [])
+    .filter((item) => item.date >= localDateKey(Date.now() - 7 * 86_400_000))
+    .map((item) => {
+      const content = item.contentId ? findContentItem(item.contentId) : null;
+      return {
+        id: item.id,
+        date: item.date,
+        destinationId: item.destinationId,
+        idea: item.idea,
+        status: weekItemStatus(item),
+        contentId: item.contentId,
+        title: content?.title || null,
+        publishAt: item.publishAt,
+        error: item.error || null,
+        youtubeUrl: content?.publish_result?.youtube?.url || generatedVideoForContentId(item.contentId)?.metadata?.scheduled_youtube?.url || null,
+      };
+    });
+  return { today, publishTime: weekPublishTime, running: weekWorkerRunning, startDate: plan?.startDate || null, endDate: plan?.endDate || null, items };
+}
+
+async function facebookStudioStatus() {
+  const pages = await facebookConnectedPages();
+  const assigned = Object.fromEntries(weekDestinations.map((destinationId) => [destinationId, facebookPageFor(destinationId)?.pageId || '']));
+  const names = weekDestinations.map((destinationId) => `${destinationId === 'religioso' ? 'Vida con Dios' : 'Peliculas'} → ${facebookPageFor(destinationId)?.pageName || 'sin pagina'}`).join(' · ');
+  if (!facebookPublishingEnabled) return { status: 'disabled', message: 'Facebook esta deshabilitado (FACEBOOK_PUBLISHING_ENABLED=false).', pages, assigned };
+  if (!pages.length) return { status: 'error', message: 'No pude leer las paginas conectadas en facebookrewards.', pages, assigned };
+  return { status: 'ok', message: `Reels activos. ${names}. Cambialo en Ajustes.`, pages, assigned };
+}
+
 function studioJobView(job) {
   if (!job) return null;
   return {
@@ -4313,7 +4663,9 @@ function studioState() {
         tags: youtubeTagsFor(metadata.destinationId),
         youtubeChannel: youtubeChannels[metadata.youtubeChannelKey]?.label || null,
         tiktokManual: metadata.destinationId === 'religioso',
-        facebookPage: facebookPublishingEnabled ? metadata.facebookPageName || null : null,
+        facebookPage: facebookPublishingEnabled ? facebookPageFor(metadata.destinationId)?.pageName || null : null,
+        scheduledFor: weekItemForContent(item.contentId)?.publishAt || null,
+        scheduledYoutube: Boolean(metadata.scheduled_youtube?.ok),
         publishError: item.last_publish_error ? (item.last_publish_error.youtube?.error || item.last_publish_error.facebook?.error || 'Fallo la publicacion') : null,
         reconnectUrl: item.last_publish_error?.youtube?.reconnect_url || null,
         createdAt: item.created_at,
@@ -4341,6 +4693,7 @@ function studioState() {
     destinations,
     items,
     tests,
+    week: weekPlanView(),
     system: studioSystemStatus(),
   };
 }
@@ -4377,7 +4730,16 @@ async function saveStudioSettings(body) {
     scenePause: clamp(body.scenePause, 0.2, 1, current.scenePause),
     cinematicLook: body.cinematicLook === undefined ? current.cinematicLook : Boolean(body.cinematicLook),
     realClips: body.realClips === undefined ? current.realClips : Boolean(body.realClips),
+    facebookPages: { ...current.facebookPages },
   };
+  if (body.facebookPages && typeof body.facebookPages === 'object') {
+    const connected = new Set((await facebookConnectedPages()).map((page) => page.pageId));
+    for (const destinationId of ['religioso', 'fanspeliculas']) {
+      const pageId = String(body.facebookPages[destinationId] ?? next.facebookPages[destinationId] ?? '');
+      if (pageId && !connected.has(pageId)) throw new Error('Esa pagina de Facebook no esta conectada en facebookrewards.');
+      next.facebookPages[destinationId] = pageId;
+    }
+  }
   if (body.voiceModel) {
     const model = (await studioVoiceModels()).find((candidate) => candidate.id === body.voiceModel);
     if (!model) throw new Error('Esa voz no esta instalada en speaches.');
@@ -4473,7 +4835,7 @@ async function studioChannels() {
   return {
     youtube,
     tiktok: await tiktokStudioStatus(),
-    facebook: { status: facebookPublishingEnabled ? 'ok' : 'disabled', message: facebookPublishingEnabled ? 'Publicacion en Facebook activa.' : 'Facebook esta deshabilitado (FACEBOOK_PUBLISHING_ENABLED=false).' },
+    facebook: await facebookStudioStatus(),
   };
 }
 
@@ -4541,6 +4903,11 @@ async function handleStudio(req, res, url) {
       return json(res, tiktok.ok ? 200 : 409, { ok: Boolean(tiktok.ok), tiktok, error: tiktok.error || tiktok.reason });
     }
     if (route === 'reject') return json(res, 200, rejectContent(`RECHAZAR ${String(body.contentId || '')}`));
+    if (route === 'week-start') return json(res, 200, startWeekPlan());
+    if (route === 'week-cancel') return json(res, 200, cancelWeekPlan());
+    if (route === 'week-retry') return json(res, 200, retryWeekItem(String(body.id || '')));
+    if (route === 'week-approve') return json(res, 200, await approveWeekItem(String(body.contentId || ''), body));
+    if (route === 'week-approve-all') return json(res, 200, await approveAllWeekItems());
     if (route === 'settings') return json(res, 200, { ok: true, settings: await saveStudioSettings(body) });
     if (route === 'voice-sample') return send(res, 200, await studioVoiceSample(body), 'audio/mpeg');
     if (route === 'delete-test') {
@@ -5053,6 +5420,16 @@ if (require.main === module) {
   });
   setTimeout(refreshAiIdeas, 60_000);
   setInterval(refreshAiIdeas, 30 * 60_000);
+  // Un video a medio generar cuando se reinicio el servidor vuelve a la cola.
+  const weekPlan = readWeekPlan();
+  if (weekPlan?.items.some((item) => item.status === 'generating')) {
+    for (const item of weekPlan.items) if (item.status === 'generating') item.status = 'queued';
+    writeJson(weekPlanPath, weekPlan);
+  }
+  setTimeout(runWeekWorker, 2 * 60_000);
+  setInterval(runWeekWorker, 15 * 60_000);
+  setTimeout(publishDueWeekItems, 30_000);
+  setInterval(publishDueWeekItems, 60_000);
 }
 
 module.exports = {
